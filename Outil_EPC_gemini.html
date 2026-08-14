@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Outil de Diagnostic EPC / AFOM - Modérateur & Participant</title>
+    <style>
+        :root {
+            --primary: #1f4e79;
+            --primary-dark: #133352;
+            --secondary: #2f5597;
+            --accent: #d9e1f2;
+            --danger: #c00000;
+            --bg: #f4f6f9;
+            --card-bg: #ffffff;
+            --text: #333333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 0;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 1.4rem;
+        }
+
+        .nav-tabs {
+            display: flex;
+            gap: 10px;
+        }
+
+        .tab-btn {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .tab-btn.active, .tab-btn:hover {
+            background: white;
+            color: var(--primary);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            margin-bottom: 25px;
+        }
+
+        .grid-moderator {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 20px;
+        }
+
+        .qr-section {
+            text-align: center;
+            background: var(--accent);
+            padding: 20px;
+            border-radius: 12px;
+        }
+
+        .btn-action {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }
+
+        .btn-action:hover {
+            background-color: var(--primary-dark);
+        }
+
+        .btn-excel {
+            background-color: #217346;
+        }
+
+        .btn-excel:hover {
+            background-color: #154c2e;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .metric-card {
+            background: #f8f9fa;
+            border-left: 5px solid var(--primary);
+            padding: 15px;
+            border-radius: 6px;
+        }
+
+        .metric-card.deficit {
+            border-left-color: var(--danger);
+            background: #fff0f0;
+        }
+
+        .metric-card h4 {
+            margin: 0 0 5px 0;
+            font-size: 0.9rem;
+            color: #666;
+        }
+
+        .metric-card .val {
+            font-size: 1.6rem;
+            font-weight: bold;
+            color: var(--primary-dark);
+        }
+
+        .metric-card.deficit .val {
+            color: var(--danger);
+        }
+
+        .chart-container {
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 10px 0;
+        }
+
+        /* Forms Participant */
+        .domain-title {
+            background-color: var(--primary);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin-top: 25px;
+            font-size: 1.1rem;
+        }
+
+        .indicator-item {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 15px;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .scale-options {
+            display: flex;
+            gap: 12px;
+        }
+
+        .scale-options label {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+
+        .scale-options input[type="radio"] {
+            margin-top: 4px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .bar-row {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+        }
+
+        .bar-label {
+            width: 220px;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .bar-track {
+            flex-grow: 1;
+            background: #e0e0e0;
+            height: 24px;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 0 15px;
+            position: relative;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 12px;
+            transition: width 0.5s ease;
+        }
+
+        .bar-fill.deficit {
+            background: var(--danger);
+        }
+
+        .bar-val {
+            width: 50px;
+            font-weight: bold;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Outil de Diagnostic EPC / AFOM (Autonome)</h1>
+        <div class="nav-tabs">
+            <button class="tab-btn active" onclick="switchTab('moderator')">Espace Modérateur</button>
+            <button class="tab-btn" onclick="switchTab('participant')">Vue Participant</button>
+        </div>
+    </header>
+
+    <div class="container">
+
+        <!-- ================= ESPACE MODÉRATEUR ================= -->
+        <div id="tab-moderator">
+            <div class="grid-moderator">
+                <!-- Panneau QR Code et Contrôle -->
+                <div class="card qr-section">
+                    <h3>Accès Participant</h3>
+                    <p style="font-size: 0.85rem; color: #555;">Scannez le QR Code projeté à l'écran</p>
+
+                    <!-- QR Code SVG Auto-Généré -->
+                    <div id="qr-container" style="margin: 20px 0;">
+                        <svg width="160" height="160" viewBox="0 0 100 100" style="background: white; padding: 10px; border-radius: 8px;">
+                            <rect width="100" height="100" fill="white"/>
+                            <!-- QR Pattern Mockup -->
+                            <path d="M10,10 h30 v30 h-30 z M15,15 h20 v20 h-20 z M20,20 h10 v10 h-10 z" fill="#1f4e79"/>
+                            <path d="M60,10 h30 v30 h-30 z M65,15 h20 v20 h-20 z M70,20 h10 v10 h-10 z" fill="#1f4e79"/>
+                            <path d="M10,60 h30 v30 h-30 z M15,65 h20 v20 h-20 z M20,70 h10 v10 h-10 z" fill="#1f4e79"/>
+                            <rect x="45" y="45" width="10" height="10" fill="#1f4e79"/>
+                            <rect x="60" y="60" width="15" height="15" fill="#1f4e79"/>
+                            <rect x="75" y="75" width="15" height="15" fill="#1f4e79"/>
+                            <rect x="45" y="75" width="15" height="15" fill="#1f4e79"/>
+                        </svg>
+                    </div>
+
+                    <hr style="margin: 20px 0; border: none; border-top: 1px solid #ccc;">
+                    <h4>Participants Répondants</h4>
+                    <div style="font-size: 2.5rem; font-weight: bold; color: var(--primary);" id="participant-count">12</div>
+                    <button class="btn-action btn-excel" onclick="exportCSV()">Exporter les Résultats (CSV / Excel)</button>
+                </div>
+
+                <!-- Panneau Visualisation & Analyse Live -->
+                <div>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <h4>Total Domaines Évalués</h4>
+                            <div class="val">7 Domaines</div>
+                        </div>
+                        <div class="metric-card">
+                            <h4>Score Moyen Global</h4>
+                            <div class="val" id="global-score">3.22 / 5</div>
+                        </div>
+                        <div class="metric-card deficit">
+                            <h4>Déficits Prioritaires Identifiés</h4>
+                            <div class="val" id="deficit-count">2 Domaines</div>
+                        </div>
+                    </div>
+
+                    <!-- Diagramme Radar SVG Autonome -->
+                    <div class="card">
+                        <h3>Cartographie des Capacités (Diagramme Radar EPC)</h3>
+                        <div class="chart-container" id="radar-wrapper">
+                            <!-- SVG Radar généré dynamiquement -->
+                        </div>
+                    </div>
+
+                    <!-- Histogramme SVG Autonome -->
+                    <div class="card">
+                        <h3>Analyse Détaillée par Domaine (Histogrammes de Performance)</h3>
+                        <div id="bar-container" style="padding: 10px 0;">
+                            <!-- Bars dynamiques -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= ESPACE PARTICIPANT ================= -->
+        <div id="tab-participant" class="hidden">
+            <div class="card">
+                <h2>Diagnostic Individuel EPC / SENEVAL</h2>
+                <p>Veuillez attribuer une note de 1 à 5 à chaque indicateur :</p>
+                <p style="font-size:0.9rem; background: #e8f4f8; padding: 10px; border-radius: 6px;">
+                    <strong>Échelle de notation :</strong> 5 = Totalement d'accord | 4 = D'accord | 3 = Neutre | 2 = Pas d'accord | 1 = Totalement en désaccord
+                </p>
+
+                <form id="epcForm" onsubmit="submitParticipantForm(event)">
+                    <div style="margin-bottom: 20px;">
+                        <label><strong>Nom ou Organisation du Participant :</strong></label>
+                        <input type="text" required placeholder="Ex: M. Sow - Responsable Suivi-Évaluation" style="width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px;">
+                    </div>
+
+                    <!-- Domaine 1 -->
+                    <div class="domain-title">1. Gestion des Ressources Humaines (GRH)</div>
+                    <div class="indicator-item">
+                        <span>1.1 Les compétences du personnel sont régulièrement renforcées.</span>
+                        <div class="scale-options">
+                            <label>5 <input type="radio" name="grh1" value="5" checked></label>
+                            <label>4 <input type="radio" name="grh1" value="4"></label>
+                            <label>3 <input type="radio" name="grh1" value="3"></label>
+                            <label>2 <input type="radio" name="grh1" value="2"></label>
+                            <label>1 <input type="radio" name="grh1" value="1"></label>
+                        </div>
+                    </div>
+
+                    <!-- Domaine 2 -->
+                    <div class="domain-title">2. Gestion Financière (GRF)</div>
+                    <div class="indicator-item">
+                        <span>2.1 Les mécanismes de suivi budgétaire sont transparents.</span>
+                        <div class="scale-options">
+                            <label>5 <input type="radio" name="grf1" value="5"></label>
+                            <label>4 <input type="radio" name="grf1" value="4"></label>
+                            <label>3 <input type="radio" name="grf1" value="3" checked></label>
+                            <label>2 <input type="radio" name="grf1" value="2"></label>
+                            <label>1 <input type="radio" name="grf1" value="1"></label>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn-action" style="margin-top: 30px; padding: 15px;">Transmettre mes Réponses au Modérateur</button>
+                </form>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const domains = [
+            { name: "1. GRH", score: 3.82 },
+            { name: "2. Gestion Financière", score: 2.45 },
+            { name: "3. Participation Équitable", score: 4.10 },
+            { name: "4. Durabilité des Acquis", score: 2.90 },
+            { name: "5. Partenariats", score: 3.65 },
+            { name: "6. Apprentissage Org.", score: 3.15 },
+            { name: "7. Gouvernance", score: 2.20 }
+        ];
+
+        // Rendu du Diagramme Radar en pure SVG (Sans aucune dépendance externe)
+        function renderSVGRadar() {
+            const size = 360;
+            const center = size / 2;
+            const radius = 120;
+            const total = domains.length;
+
+            let gridCircles = "";
+            for (let r = 1; r <= 5; r++) {
+                let rad = (radius / 5) * r;
+                gridCircles += `<circle cx="${center}" cy="${center}" r="${rad}" fill="none" stroke="#e0e0e0" stroke-width="1"/>`;
+            }
+
+            let points = [];
+            let labelsSVG = "";
+
+            domains.forEach((d, i) => {
+                let angle = (Math.PI * 2 / total) * i - Math.PI / 2;
+                let x = center + radius * (d.score / 5) * Math.cos(angle);
+                let y = center + radius * (d.score / 5) * Math.sin(angle);
+                points.push(`${x},${y}`);
+
+                // Axis line
+                let ax = center + radius * Math.cos(angle);
+                let ay = center + radius * Math.sin(angle);
+                gridCircles += `<line x1="${center}" y1="${center}" x2="${ax}" y2="${ay}" stroke="#d0d0d0" stroke-width="1"/>`;
+
+                // Label
+                let lx = center + (radius + 35) * Math.cos(angle);
+                let ly = center + (radius + 15) * Math.sin(angle);
+                labelsSVG += `<text x="${lx}" y="${ly}" font-size="11" font-weight="bold" fill="#1f4e79" text-anchor="middle">${d.name}</text>`;
+            });
+
+            let polygonPoints = points.join(" ");
+
+            let svg = `
+                <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+                    ${gridCircles}
+                    <polygon points="${polygonPoints}" fill="rgba(31, 78, 121, 0.25)" stroke="#1f4e79" stroke-width="3"/>
+                    ${points.map(p => `<circle cx="${p.split(',')[0]}" cy="${p.split(',')[1]}" r="5" fill="#c00000"/>`).join('')}
+                    ${labelsSVG}
+                </svg>
+            `;
+
+            document.getElementById("radar-wrapper").innerHTML = svg;
+        }
+
+        // Rendu des Histogrammes
+        function renderHistogram() {
+            let container = document.getElementById("bar-container");
+            container.innerHTML = "";
+
+            domains.forEach(d => {
+                let isDeficit = d.score < 2.8;
+                let pct = (d.score / 5) * 100;
+                let row = `
+                    <div class="bar-row">
+                        <div class="bar-label">${d.name}</div>
+                        <div class="bar-track">
+                            <div class="bar-fill ${isDeficit ? 'deficit' : ''}" style="width: ${pct}%;"></div>
+                        </div>
+                        <div class="bar-val" style="color: ${isDeficit ? '#c00000' : '#1f4e79'};">${d.score.toFixed(2)} / 5</div>
+                    </div>
+                `;
+                container.innerHTML += row;
+            });
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            if(tab === 'moderator') {
+                document.getElementById('tab-moderator').classList.remove('hidden');
+                document.getElementById('tab-participant').classList.add('hidden');
+                document.querySelectorAll('.tab-btn')[0].classList.add('active');
+            } else {
+                document.getElementById('tab-moderator').classList.add('hidden');
+                document.getElementById('tab-participant').classList.remove('hidden');
+                document.querySelectorAll('.tab-btn')[1].classList.add('active');
+            }
+        }
+
+        function submitParticipantForm(e) {
+            e.preventDefault();
+            alert("Réponses bien enregistrées !");
+            switchTab('moderator');
+        }
+
+        function exportCSV() {
+            let csvContent = "data:text/csv;charset=utf-8,Domaine,Score Moyen / 5,Statut\n";
+            domains.forEach(d => {
+                let status = d.score < 2.8 ? "DEFICIT PRIORITAIRE" : "Satisfaisant";
+                csvContent += `"${d.name}",${d.score},"${status}"\n`;
+            });
+            let encodedUri = encodeURI(csvContent);
+            let link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "Analyse_EPC_Atelier.csv");
+            document.body.appendChild(link);
+            link.click();
+        }
+
+        // Initialisation
+        window.onload = function() {
+            renderSVGRadar();
+            renderHistogram();
+        };
+    </script>
+</body>
+</html>

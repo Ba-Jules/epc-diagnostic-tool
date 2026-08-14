@@ -1,0 +1,24 @@
+# Python runtime
+__pycache__/
+*.py[cod]
+
+# Local workshop data and generated exports
+data/*.sqlite3
+data/*.sqlite3-*
+matrice-questionnaire-vierge.xlsx
+diagnostic*.xlsx
+diagnostic*.docx
+diagnostic*.pdf
+
+# Temporary office files and operating-system/editor metadata
+~$*
+*.tmp
+*.temp
+*.bak
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary code-generation artifacts
+gemini-code-*
