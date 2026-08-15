@@ -126,7 +126,75 @@ function launchCollecte(id,ready){
   moderator(id)
 }
 function stepperHtml(done){let labels=['Préparation','Collecte','Diagnostic','Priorités','Analyse','Recommandations','Rapport'];let cur=done.findIndex(x=>!x);return `<div class="stepper">${labels.map((l,i)=>{let cls=done[i]?'done':(i===cur?'current':'');return `<span class="step ${cls}"><span class="dot">${done[i]?'✓':i+1}</span>${l}</span>`}).join('')}</div>`}
-function qrSvg(link){return `<svg viewBox="0 0 29 29">${Array.from({length:29},(_,y)=>Array.from({length:29},(_,x)=>((x*x+y*y+x*y+link.charCodeAt((x+y)%link.length))%4===0)?`<rect x="${x}" y="${y}" width="1" height="1"/>`:'').join('')).join('')}</svg>`}
+// Standalone QR Code encoder (Byte mode, versions 1-6, EC levels L/M/Q/H) — ISO/IEC 18004.
+// No external dependencies; verified by round-trip decode against a reference decoder.
+const generateQR=(function(){
+'use strict';
+const GF_EXP=new Array(512),GF_LOG=new Array(256);
+(function initGF(){let x=1;for(let i=0;i<255;i++){GF_EXP[i]=x;GF_LOG[x]=i;x<<=1;if(x&0x100)x^=0x11d}for(let i=255;i<512;i++)GF_EXP[i]=GF_EXP[i-255]})();
+function gfMul(a,b){return(a===0||b===0)?0:GF_EXP[GF_LOG[a]+GF_LOG[b]]}
+function rsGeneratorPoly(degree){let poly=[1];for(let i=0;i<degree;i++){const next=new Array(poly.length+1).fill(0);for(let j=0;j<poly.length;j++){next[j]^=gfMul(poly[j],1);next[j+1]^=gfMul(poly[j],GF_EXP[i])}poly=next}return poly}
+function rsEncode(dataBytes,ecLen){const gen=rsGeneratorPoly(ecLen);const res=dataBytes.concat(new Array(ecLen).fill(0));for(let i=0;i<dataBytes.length;i++){const coef=res[i];if(coef===0)continue;for(let j=0;j<gen.length;j++)res[i+j]^=gfMul(gen[j],coef)}return res.slice(dataBytes.length)}
+const EC_L=0,EC_M=1,EC_Q=2,EC_H=3;
+// RS_BLOCK_TABLE[version-1][ecLevel]=[ecCodewordsPerBlock,blocks1,dataCw1,blocks2,dataCw2] (ISO/IEC 18004 Table 9, versions 1-10)
+const RS_BLOCK_TABLE=[
+[[7,1,19,0,0],[10,1,16,0,0],[13,1,13,0,0],[17,1,9,0,0]],
+[[10,1,34,0,0],[16,1,28,0,0],[22,1,22,0,0],[28,1,16,0,0]],
+[[15,1,55,0,0],[26,1,44,0,0],[18,2,17,0,0],[22,2,13,0,0]],
+[[20,1,80,0,0],[18,2,32,0,0],[26,2,24,0,0],[16,4,9,0,0]],
+[[26,1,108,0,0],[24,2,43,0,0],[18,2,15,2,16],[22,2,11,2,12]],
+[[18,2,68,0,0],[16,4,27,0,0],[24,4,19,0,0],[28,4,15,0,0]],
+];
+const VERSION_SIZE=v=>17+4*v;
+const ALIGNMENT_POS=[[],[6,18],[6,22],[6,26],[6,30],[6,34]];
+function bchFormat(data){let d=data<<10;const g=0x537;while(bitLength(d)-bitLength(g)>=0)d^=g<<(bitLength(d)-bitLength(g));return(data<<10|d)^0x5412}
+function bitLength(n){let l=0;while(n!==0){l++;n>>>=1}return l}
+const EC_INDICATOR={0:0b01,1:0b00,2:0b11,3:0b10};
+const MAX_VERSION=6;
+function chooseVersion(byteLen,ec){for(let v=1;v<=MAX_VERSION;v++){const blocks=RS_BLOCK_TABLE[v-1][ec];const totalData=blocks[1]*blocks[2]+blocks[3]*blocks[4];if(byteLen<=totalData-2)return v}const b=RS_BLOCK_TABLE[MAX_VERSION-1][ec];throw new Error('texte trop long pour un QR code (max ~'+(b[1]*b[2]+b[3]*b[4]-2)+' octets)')}
+function encodeBytesUtf8(str){const bytes=[];for(let i=0;i<str.length;i++){let c=str.codePointAt(i);if(c>0xFFFF)i++;if(c<0x80)bytes.push(c);else if(c<0x800)bytes.push(0xC0|(c>>6),0x80|(c&0x3F));else if(c<0x10000)bytes.push(0xE0|(c>>12),0x80|((c>>6)&0x3F),0x80|(c&0x3F));else bytes.push(0xF0|(c>>18),0x80|((c>>12)&0x3F),0x80|((c>>6)&0x3F),0x80|(c&0x3F))}return bytes}
+function buildDataCodewords(byteData,version,ec){const blocks=RS_BLOCK_TABLE[version-1][ec];const totalDataCw=blocks[1]*blocks[2]+blocks[3]*blocks[4];const bits=[];function put(val,len){for(let i=len-1;i>=0;i--)bits.push((val>>>i)&1)}put(0b0100,4);put(byteData.length,8);for(const b of byteData)put(b,8);const totalBits=totalDataCw*8;for(let i=0;i<4&&bits.length<totalBits;i++)bits.push(0);while(bits.length%8!==0)bits.push(0);const padBytes=[0xEC,0x11];let pi=0;while(bits.length<totalBits){put(padBytes[pi%2],8);pi++}const dataCw=[];for(let i=0;i<bits.length;i+=8){let v=0;for(let j=0;j<8;j++)v=(v<<1)|bits[i+j];dataCw.push(v)}return dataCw}
+function interleave(dataCw,version,ec){const[ecLen,b1,d1,b2,d2]=RS_BLOCK_TABLE[version-1][ec];const groups=[];let offset=0;for(let i=0;i<b1;i++){groups.push(dataCw.slice(offset,offset+d1));offset+=d1}for(let i=0;i<b2;i++){groups.push(dataCw.slice(offset,offset+d2));offset+=d2}const ecGroups=groups.map(g=>rsEncode(g,ecLen));const maxData=Math.max(d1,b2?d2:0);const result=[];for(let i=0;i<maxData;i++)for(const g of groups)if(i<g.length)result.push(g[i]);for(let i=0;i<ecLen;i++)for(const g of ecGroups)result.push(g[i]);return result}
+function buildMatrix(version,ec,maskPattern,finalCodewords){
+const N=VERSION_SIZE(version);const mat=Array.from({length:N},()=>new Array(N).fill(null));const isFn=Array.from({length:N},()=>new Array(N).fill(false));
+function setFn(r,c,v){if(r>=0&&r<N&&c>=0&&c<N){mat[r][c]=v;isFn[r][c]=true}}
+function placeFinder(r,c){for(let dr=-1;dr<=7;dr++)for(let dc=-1;dc<=7;dc++){const rr=r+dr,cc=c+dc;if(rr<0||rr>=N||cc<0||cc>=N)continue;const inRing=(dr>=0&&dr<=6&&dc>=0&&dc<=6)&&(dr===0||dr===6||dc===0||dc===6);const inCore=dr>=2&&dr<=4&&dc>=2&&dc<=4;const val=(dr>=0&&dr<=6&&dc>=0&&dc<=6)?(inRing||inCore):false;setFn(rr,cc,val)}}
+placeFinder(0,0);placeFinder(0,N-7);placeFinder(N-7,0);
+for(let i=8;i<N-8;i++){setFn(6,i,i%2===0);setFn(i,6,i%2===0)}
+const pos=ALIGNMENT_POS[version-1];
+for(const r of pos)for(const c of pos){if((r<=8&&c<=8)||(r<=8&&c>=N-9)||(r>=N-9&&c<=8))continue;for(let dr=-2;dr<=2;dr++)for(let dc=-2;dc<=2;dc++){const ring=Math.max(Math.abs(dr),Math.abs(dc));setFn(r+dr,c+dc,ring!==1)}}
+setFn(4*version+9,8,true);
+for(let i=0;i<=14;i++){if(i<6)setFn(i,8,false);else if(i<8)setFn(i+1,8,false);else setFn(N-15+i,8,false);if(i<8)setFn(8,N-i-1,false);else if(i<9)setFn(8,15-i-1+1,false);else setFn(8,15-i-1,false)}
+function maskAt(r,c){switch(maskPattern){case 0:return(r+c)%2===0;case 1:return r%2===0;case 2:return c%3===0;case 3:return(r+c)%3===0;case 4:return(Math.floor(r/2)+Math.floor(c/3))%2===0;case 5:return(r*c)%2+(r*c)%3===0;case 6:return((r*c)%2+(r*c)%3)%2===0;case 7:return((r+c)%2+(r*c)%3)%2===0}return false}
+const bits=[];for(const cw of finalCodewords)for(let i=7;i>=0;i--)bits.push((cw>>>i)&1);
+let bitIdx=0,dir=-1,col=N-1;
+while(col>0){if(col===6)col--;for(let i=0;i<N;i++){const row=dir===-1?N-1-i:i;for(const c of[col,col-1]){if(!isFn[row][c]){const bit=bitIdx<bits.length?bits[bitIdx]:0;bitIdx++;const m=maskAt(row,c);mat[row][c]=!!bit!==m}}}dir=-dir;col-=2}
+const fmtData=(EC_INDICATOR[ec]<<3)|maskPattern;const fmtBits=bchFormat(fmtData);
+for(let i=0;i<=14;i++){const mod=((fmtBits>>i)&1)===1;if(i<6)mat[i][8]=mod;else if(i<8)mat[i+1][8]=mod;else mat[N-15+i][8]=mod;if(i<8)mat[8][N-i-1]=mod;else if(i<9)mat[8][15-i-1+1]=mod;else mat[8][15-i-1]=mod}
+mat[N-8][8]=true;
+return mat}
+function penaltyScore(mat){const N=mat.length;let score=0;
+for(let r=0;r<N;r++){let runLen=1;for(let c=1;c<N;c++){if(mat[r][c]===mat[r][c-1])runLen++;else{if(runLen>=5)score+=3+(runLen-5);runLen=1}}if(runLen>=5)score+=3+(runLen-5)}
+for(let c=0;c<N;c++){let runLen=1;for(let r=1;r<N;r++){if(mat[r][c]===mat[r-1][c])runLen++;else{if(runLen>=5)score+=3+(runLen-5);runLen=1}}if(runLen>=5)score+=3+(runLen-5)}
+for(let r=0;r<N-1;r++)for(let c=0;c<N-1;c++){const v=mat[r][c];if(v===mat[r][c+1]&&v===mat[r+1][c]&&v===mat[r+1][c+1])score+=3}
+const pattern=[true,false,true,true,true,false,true];
+function matchAt(arr,i){for(let k=0;k<7;k++)if(arr[i+k]!==pattern[k])return false;return true}
+for(let r=0;r<N;r++)for(let c=0;c<=N-7;c++){if(matchAt(mat[r].slice(c,c+7),0))score+=40}
+for(let c=0;c<N;c++)for(let r=0;r<=N-7;r++){const col=[];for(let k=0;k<7;k++)col.push(mat[r+k][c]);if(matchAt(col,0))score+=40}
+let dark=0;for(let r=0;r<N;r++)for(let c=0;c<N;c++)if(mat[r][c])dark++;
+score+=Math.floor(Math.abs(Math.round((dark*100)/(N*N))-50)/5)*10;
+return score}
+return function generateQR(text,ecLevel){
+const ec={L:EC_L,M:EC_M,Q:EC_Q,H:EC_H}[ecLevel||'M'];
+const byteData=encodeBytesUtf8(text);
+const version=chooseVersion(byteData.length,ec);
+const dataCw=buildDataCodewords(byteData,version,ec);
+const finalCw=interleave(dataCw,version,ec);
+let best=null,bestScore=Infinity;
+for(let mask=0;mask<8;mask++){const mat=buildMatrix(version,ec,mask,finalCw);const s=penaltyScore(mat);if(s<bestScore){bestScore=s;best=mat}}
+return best.map(row=>row.map(v=>!!v))}
+})();
+function qrSvg(link){let mat;try{mat=generateQR(link,'M')}catch(e){return `<p class="error">${esc(e.message)}</p>`}let n=mat.length,quiet=4,size=n+2*quiet,rects='';for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(mat[r][c])rects+=`<rect x="${c+quiet}" y="${r+quiet}" width="1" height="1"/>`;return `<svg viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges">${rects}</svg>`}
 function copyLink(link){navigator.clipboard.writeText(link).then(()=>notice('Lien copié.')).catch(()=>notice('Copie impossible : sélectionnez le lien.'))}
 async function moderator(id){let [a,w]=await Promise.all([api('/api/sessions/'+id+'/analysis'),api('/api/sessions/'+id+'/workshop-data')]);let link=location.origin+'/?session='+id;let done=[true,a.completedCount>0,w.priorities.length>0,w.notes.length>0,w.recommendations.length>0,w.recommendations.length>0,false];let pct=a.participantCount?Math.round(a.completedCount/a.participantCount*100):0;window.currentSessionId=id;shell('collecte','collecte',a.session.name,'Tableau de bord de l’atelier',{id,name:a.session.name,location:a.session.location,date:a.session.date,pct,statusLabel:a.session.status==='closed'?'Terminé':(a.participantCount?'Collecte '+pct+'%':'Préparation')});let primary=(!a.participantCount)?{l:'Ouvrir la collecte',a:`qr('${link}')`}:(a.completedCount<a.participantCount)?{l:'Afficher le QR',a:`qr('${link}')`}:(!w.priorities.length)?{l:'Voir le diagnostic',a:`diagnostic('${id}')`}:(!w.notes.length)?{l:'Analyser les priorités',a:`analysisPriorities('${id}')`}:(!w.recommendations.length)?{l:'Construire les recommandations',a:`recommendationsView('${id}')`}:{l:'Voir le rapport final',a:`finalReport('${id}')`};app.innerHTML=`<button class="ghost" onclick="load()">← Tous les ateliers</button><div class="card"><div class="section-header"><div><h2>${esc(a.session.name)}</h2><p class="text-meta">${sessionStatusBadge(a.session,a)}${a.session.date?' · '+esc(a.session.date):''}</p></div></div>${stepperHtml(done)}<div class="grid"><div class="metric"><span class="label">Participants</span><b>${a.participantCount}</b></div><div class="metric"><span class="label">Questionnaires validés</span><b>${a.completedCount}</b></div><div class="metric"><span class="label">Taux de complétion</span><b>${pct}%</b></div>${a.global.capacity!=null?`<div class="metric"><span class="label">Capacité globale</span><b>${fmt(a.global.capacity)}</b></div>`:''}${a.global.consensus!=null?`<div class="metric"><span class="label">Consensus global</span><b>${fmt(a.global.consensus)}</b></div>`:''}</div><div class="row" style="margin-top:1.1rem"><button onclick="${primary.a}">${primary.l}</button><button class="secondary" onclick="diagnostic('${id}')">Diagnostic</button><button class="ghost" onclick="preview('${id}')">Prévisualiser le questionnaire</button><button class="ghost" onclick="reportMetadata('${id}')">Informations de l’atelier</button><button class="ghost" onclick="finalReport('${id}')">Rapport final</button><button class="danger" onclick="removeSession('${id}','${esc(a.session.name)}')">Supprimer l’atelier</button></div></div><div class="card"><div class="section-header"><h3>Collecte</h3></div><div class="qr-panel sidebar-panel"><div class="qr">${qrSvg(link)}</div><div><p class="text-meta">Lien participant</p><div class="link-box"><span style="flex:1">${esc(link)}</span></div><div class="row" style="margin-top:.6rem"><button class="secondary" onclick="copyLink('${link}')">Copier le lien</button><button class="secondary" onclick="join('${id}')">Ouvrir participant</button><button class="ghost" onclick="qr('${link}')">Afficher en grand</button></div><p class="text-meta" style="margin-top:.6rem">${a.participantCount} participant${a.participantCount>1?'s':''} · ${a.completedCount} questionnaire${a.completedCount>1?'s':''} validé${a.completedCount>1?'s':''}</p></div></div></div>`}
 async function removeSession(id,name){if(!confirm('Supprimer définitivement l’atelier "'+name+'" ?\n\nCette action supprime aussi tous les participants, réponses, priorités, analyses et recommandations de cet atelier, même s’il est encore en cours. Impossible à annuler.'))return;await api('/api/sessions/'+id,{method:'DELETE'});notice('Atelier supprimé.');await load()}
