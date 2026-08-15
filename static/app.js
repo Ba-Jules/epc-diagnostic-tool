@@ -22,36 +22,109 @@ function renderTopbar(title,subtitle,cycleStage){
   let stages=[['config','CONFIGURATION'],['collecte','COLLECTE'],['analyse','ANALYSE'],['restitution','RESTITUTION']];
   return `<div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-help" title="Aide" onclick="helpPanel()">?</button>`;
 }
+const HELP_SCREENS={
+  home:{title:'Accueil',body:`
+    <p>C’est le point de départ : la liste de tous vos ateliers de diagnostic.</p>
+    <p class="help-callout"><b>Le parcours général :</b> CONFIGURER → COLLECTER → ANALYSER → RESTITUER.</p>
+    <h3>Que faire ici ?</h3>
+    <ol>
+      <li><b>Nouveau diagnostic</b> pour créer un atelier.</li>
+      <li><b>Reprendre</b> pour continuer votre atelier le plus récent.</li>
+      <li><b>Ateliers récents</b> pour rouvrir n’importe quel atelier déjà créé.</li>
+      <li><b>Modèles &amp; questionnaires</b> pour consulter ou dupliquer un questionnaire.</li>
+    </ol>
+    <p class="help-callout"><b>À retenir :</b> reprendre un atelier existant ne fait perdre aucune information déjà enregistrée.</p>
+    <p><b>Étape suivante :</b> Configuration.</p>`},
+  config:{title:'Configuration de l’atelier',body:`
+    <p>Cet écran sert à préparer l’atelier avant d’ouvrir la collecte auprès des participants.</p>
+    <h3>Que faire, dans quel ordre ?</h3>
+    <ol>
+      <li><b>Informations de l’atelier</b> : nom, lieu, date, description.</li>
+      <li><b>Participants prévus</b> : nombre indicatif, utilisé comme référence — différent du nombre réel de répondants, recalculé après la collecte.</li>
+      <li><b>Questionnaire</b> : le modèle EPC / SENEVAL est utilisé par défaut. Vous pouvez le garder, en changer, ou modifier ses domaines/références/indicateurs.</li>
+      <li><b>Échelle de notation</b> : renommez les niveaux ou ajustez leur nombre (2 à 9).</li>
+    </ol>
+    <p class="help-callout"><b>À retenir :</b> une fois que l’atelier a des réponses, le questionnaire et l’échelle sont verrouillés pour ne pas invalider les données déjà collectées — modifiez-les avant d’ouvrir la collecte.</p>
+    <p><b>Étape suivante :</b> ouvrir la collecte.</p>
+    <h3>Assistant IA — facultatif</h3>
+    <p>L’assistant IA peut vous aider à interpréter les résultats, préparer l’analyse, explorer des hypothèses, formuler des recommandations et rédiger la synthèse du rapport. <b>Il ne modifie jamais les calculs EPC et ne décide pas à la place du groupe.</b></p>
+    <ol>
+      <li>Activer l’assistant IA.</li>
+      <li>Choisir un fournisseur.</li>
+      <li>Obtenir une clé API <span class="text-meta">(le « ? » à côté du champ Clé API explique comment, selon le fournisseur choisi)</span>.</li>
+      <li>Coller la clé.</li>
+      <li>Choisir le modèle recommandé.</li>
+      <li>Tester la connexion.</li>
+    </ol>
+    <p><b>Badges</b> <span class="badge ai-badge" data-pricing="GRATUIT">GRATUIT</span> <span class="badge ai-badge" data-pricing="ESSAI">ESSAI</span> <span class="badge ai-badge" data-pricing="PAYANT">PAYANT</span> : ces indications concernent l’accès à l’API du fournisseur (pas son usage grand public) et peuvent évoluer.</p>
+    <p class="help-callout"><b>À retenir :</b> la clé API est personnelle. Ne la partagez pas avec les participants.</p>
+    <p>Lorsque vous utilisez une fonction IA, les données nécessaires à cette analyse sont transmises au fournisseur sélectionné. Les réponses individuelles nominatives et les informations techniques inutiles ne sont pas transmises. EPC / SENEVAL fonctionne normalement si l’IA est désactivée.</p>
+    <p class="help-callout"><b>En cas de problème :</b> clé API refusée → vérifiez la clé, le fournisseur, le quota ou le modèle. Assistant IA indisponible → vous pouvez poursuivre l’atelier normalement, sans IA.</p>`},
+  questionnaire:{title:'Questionnaire',body:`
+    <p>Cet écran présente la structure du questionnaire utilisé pour l’atelier.</p>
+    <h3>Vocabulaire</h3>
+    <p><b>Domaine</b> : grande thématique (ex. Gestion des ressources humaines). <b>Référence</b> : identifiant court d’une question. <b>Indicateur qualitatif / capacité</b> : la question elle-même, notée par les participants selon l’échelle définie en Configuration.</p>
+    <h3>Que faire ?</h3>
+    <ul>
+      <li>Modifier, ajouter ou supprimer un domaine ou un indicateur.</li>
+      <li>Importer une matrice Excel déjà préparée.</li>
+      <li>Télécharger la matrice pour la modifier hors ligne puis la réimporter.</li>
+    </ul>
+    <p class="help-callout"><b>À retenir :</b> la numérotation et l’ordre d’affichage sont gérés automatiquement.</p>
+    <p class="help-callout"><b>En cas de problème :</b> questionnaire vide → revenez ici pour ajouter au moins un domaine avec une question.</p>`},
+  collecte:{title:'Collecte',body:`
+    <p>Cet écran sert à ouvrir la collecte des réponses et à en suivre l’avancement.</p>
+    <h3>Que faire, dans quel ordre ?</h3>
+    <ol>
+      <li>Ouvrir la collecte.</li>
+      <li>Afficher ou partager le QR code / le lien participant.</li>
+      <li>Les participants répondent depuis leur téléphone.</li>
+      <li>Suivre le nombre de participants et de questionnaires validés.</li>
+      <li>Passer aux résultats lorsque la collecte est suffisante ou terminée.</li>
+    </ol>
+    <p class="help-callout"><b>À retenir :</b> les participants n’ont accès qu’au questionnaire — jamais à la configuration, ni à l’assistant IA.</p>
+    <p class="help-callout"><b>En cas de problème :</b> QR inaccessible → vérifiez que l’adresse de l’application est bien accessible depuis le téléphone des participants.</p>`},
+  resultats:{title:'Résultats / Diagnostic',body:`
+    <p><b>Capacité</b> = niveau obtenu à partir des réponses. <b>Consensus</b> = degré de convergence entre les réponses des participants.</p>
+    <h3>Comment lire les deux ensemble ?</h3>
+    <p class="help-callout">Capacité faible + consensus élevé → faiblesse largement partagée.</p>
+    <p class="help-callout">Capacité faible + consensus faible → faiblesse possible mais perceptions divergentes.</p>
+    <p class="help-callout">Capacité élevée + consensus élevé → force largement reconnue.</p>
+    <p class="help-callout">Capacité élevée + consensus faible → situation globalement favorable, mais vécue différemment selon les participants.</p>
+    <p>Si l’assistant IA est activé, il peut proposer une lecture de ces résultats (bouton « ✦ Analyser avec l’IA »).</p>
+    <h3>Priorités et analyse</h3>
+    <p>Les priorités sont choisies par les participants et le modérateur selon le processus EPC. Pour chaque priorité retenue, vous documentez un constat, puis des causes, conséquences et leviers.</p>
+    <p>L’IA peut aider à reformuler le constat, préparer des questions, suggérer des hypothèses de causes, de conséquences, ou identifier des leviers.</p>
+    <p class="help-callout"><b>À retenir :</b> une suggestion IA n’est jamais une cause validée. Elle doit être discutée et retenue explicitement par le groupe.</p>
+    <p class="help-callout"><b>En cas de problème :</b> pas de résultats → vérifiez qu’au moins un questionnaire a été validé par un participant.</p>`},
+  recommandations:{title:'Recommandations',body:`
+    <p>Cet écran construit la chaîne qui relie les résultats aux actions à mener :</p>
+    <p class="help-callout">PRIORITÉ → CONSTAT → CAUSES → LEVIERS → RECOMMANDATIONS</p>
+    <p>L’IA peut proposer des pistes de recommandations fondées sur les causes et leviers déjà retenus, mais le groupe et le modérateur conservent la validation finale.</p>
+    <h3>Formations et plan d’action</h3>
+    <p>Depuis cet écran, accédez aussi aux <b>besoins / thèmes de formation</b> (repris automatiquement des recommandations de catégorie Formation) et au <b>plan d’action</b> (tableau des recommandations retenues, avec responsable et échéance).</p>
+    <p><b>Étape suivante :</b> Rapport final.</p>`},
+  rapport:{title:'Rapport final',body:`
+    <p>Le rapport rassemble automatiquement : méthodologie, participation, résultats EPC, graphiques, priorités, analyses, recommandations, formations, plan d’action et annexes.</p>
+    <p>Téléchargez-le en Word, Excel, ou PDF (impression du rapport web).</p>
+    <h3>✦ Assistance IA au rapport</h3>
+    <p>L’IA peut préparer une proposition de rédaction à partir des résultats et analyses déjà validés. Elle ne recalcule pas les résultats et ne doit pas inventer les informations manquantes. Vous pouvez retenir, modifier, régénérer ou ignorer chaque proposition.</p>
+    <p class="help-callout"><b>DONNÉES EPC</b> → calculées automatiquement. <b>TEXTE IA</b> → proposition rédactionnelle soumise à votre validation.</p>`},
+};
 function helpPanel(){
+  let key=window.currentHelpKey||'home',screen=HELP_SCREENS[key]||HELP_SCREENS.home;
   let n=document.querySelector('#notice');if(!n){n=document.createElement('div');n.id='notice';document.body.appendChild(n)}
   n.className='help-modal';
   n.innerHTML=`<div>
-    <h2>Aide — Outil de diagnostic EPC / SENEVAL</h2>
-    <p class="text-meta">Ce guide reste accessible à tout moment via le bouton « ? » en haut à droite.</p>
-    <h3>À quoi sert l’outil</h3>
-    <p>Il pilote un atelier de diagnostic organisationnel de bout en bout : préparation du questionnaire, collecte des réponses des participants, calcul des scores de capacité et de consensus par domaine, puis restitution (résultats, priorités, recommandations, rapport exportable).</p>
-    <h3>Mode d’emploi, étape par étape</h3>
-    <ol>
-      <li><b>Accueil → Nouveau diagnostic.</b> Donnez un nom à l’atelier ; vous êtes envoyé directement sur l’écran Configuration.</li>
-      <li><b>Configuration — informations de l’atelier.</b> Complétez lieu, date et description (optionnelle), puis « Enregistrer ».</li>
-      <li><b>Configuration — participants.</b> Indiquez le nombre de participants prévus (référence pour les analyses ; le nombre réel est recalculé à partir des réponses collectées).</li>
-      <li><b>Configuration — questionnaire.</b> Le modèle <b>EPC / SENEVAL</b> est utilisé par défaut pour tout nouvel atelier. Vous pouvez le garder tel quel, ou depuis ce même écran : « Changer de questionnaire » pour reprendre un autre modèle existant, ou « Nouveau questionnaire » pour en créer un vierge. « Voir / Modifier le questionnaire » permet d’ajouter, renommer ou supprimer des domaines et des indicateurs.</li>
-      <li><b>Configuration — échelle de notation.</b> Renommez les niveaux ou ajustez leur nombre (2 à 9) selon vos besoins. Une fois que l’atelier a des réponses, l’échelle et le questionnaire sont verrouillés pour ne pas invalider les données déjà collectées — changez-les avant d’ouvrir la collecte.</li>
-      <li><b>Ouvrir la collecte.</b> Depuis Configuration ou l’onglet Collecte : partagez le lien ou le QR code aux participants, qui répondent depuis leur téléphone ou en salle.</li>
-      <li><b>Résultats / Analyse.</b> Suivez la progression, consultez les scores par domaine et la grille graduée capacité/consensus.</li>
-      <li><b>Recommandations.</b> Sélectionnez des priorités et formulez les pistes d’action associées.</li>
-      <li><b>Rapport.</b> Exportez le diagnostic en Word, Excel, PDF (impression du rapport web) ou CSV.</li>
-    </ol>
-    <h3>Vocabulaire</h3>
-    <p><b>Domaine</b> : grande thématique de capacité organisationnelle (ex. Gestion des ressources humaines). <b>Indicateur</b> : question notée par les participants au sein d’un domaine. <b>Capacité</b> : moyenne des notes, ramenée sur 100. <b>Consensus</b> : degré d’accord entre participants (dispersion des notes). <b>Priorité</b> : indicateur retenu pour analyse approfondie et recommandations.</p>
-    <h3>Assistant IA (facultatif)</h3>
-    <p>Un assistant IA peut être activé depuis <b>Configuration → 5 · Assistant IA</b>, en choisissant un fournisseur (Gemini, Groq, OpenRouter, Cerebras, OpenAI, Anthropic, DeepSeek ou xAI Grok) et en collant une clé API. <b>L’outil fonctionne intégralement sans lui</b> : par défaut il est désactivé et aucun calcul EPC n’en dépend.</p>
-    <p>Une fois activé, des boutons « ✦ » apparaissent au diagnostic, à l’analyse des priorités (constat, causes, conséquences, leviers), aux recommandations, aux formations, au plan d’action et au rapport final. Chaque suggestion s’affiche dans un encart modifiable et <b>n’est enregistrée que si vous cliquez sur « Retenir »</b> — l’IA ne choisit et ne valide jamais rien à la place du groupe. Votre clé API reste sur le serveur : elle n’est jamais visible du participant ni renvoyée au navigateur.</p>
+    <h2>Aide — ${esc(screen.title)}</h2>
+    <p class="text-meta">Outil de diagnostic EPC / SENEVAL · le bouton « ? » ouvre toujours l’aide de l’écran où vous êtes.</p>
+    ${screen.body}
     <button class="secondary help-close" onclick="this.closest('.help-modal').remove()">Fermer</button>
   </div>`;
 }
 function shell(active,cycleStage,title,subtitle,sessionSummary){
   document.querySelector('.app-shell')?.classList.remove('participant-mode');
+  window.currentHelpKey=active;
   if(sessionSummary!==undefined)window.currentSessionSummary=sessionSummary;
   document.querySelector('#sidebar').innerHTML=renderSidebar(active);
   document.querySelector('#topbar').innerHTML=renderTopbar(title,subtitle,cycleStage);
