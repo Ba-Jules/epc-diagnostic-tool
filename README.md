@@ -34,6 +34,17 @@ python app.py
 
 Ouvrir ensuite [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+## Assistant IA optionnel
+
+Un assistant IA facultatif peut être activé depuis Configuration (« 5 · Assistant IA »). Il est désactivé par défaut, et **l'application fonctionne intégralement sans lui** — aucun calcul EPC (capacité, consensus, standardisation, graduation) ne dépend de l'IA.
+
+- **Fournisseurs pris en charge** : Google Gemini, Groq, OpenRouter, Cerebras, OpenAI, Anthropic Claude, DeepSeek, xAI Grok. Chacun est étiqueté GRATUIT / ESSAI / PAYANT selon l'accès **API** réel (à distinguer d'un chatbot gratuit, dont l'API peut être payante). Ces statuts et les URL de création de clé reflètent l'état connu à la mise en place de la fonctionnalité et méritent une vérification ponctuelle si un fournisseur change ses conditions.
+- **Clé API** : saisie une seule fois dans Configuration, elle est stockée côté serveur dans la base SQLite et n'est **jamais** renvoyée par l'API, jamais présente dans le HTML/JS servi au navigateur, jamais visible du participant, jamais journalisée, jamais exportée. Toute requête passe par le serveur (`Navigateur → Backend → Fournisseur IA`), jamais directement du navigateur vers le fournisseur.
+- **Points d'usage** : lecture croisée capacité/consensus du diagnostic, préparation de l'analyse d'une priorité, hypothèses de causes/conséquences/leviers, recommandations (fondées uniquement sur les causes et leviers déjà validés par le groupe), besoins de formation, structuration du plan d'action, et synthèse rédactionnelle du rapport final (par section ou en une fois).
+- **Aucune automatisation** : chaque suggestion s'affiche dans un encart « ✦ » distinct, modifiable avant d'être retenue. Rien n'est enregistré tant que le modérateur ne clique pas explicitement sur « Retenir » — l'IA ne valide ni ne sélectionne jamais de cause, de recommandation ou de priorité à la place du groupe.
+- **Résilience** : en cas d'indisponibilité, de clé invalide ou de quota atteint, un message clair s'affiche (« Assistant IA momentanément indisponible. Vous pouvez poursuivre l'atelier normalement. ») sans jamais interrompre l'atelier.
+- **Rapport final** : les textes IA retenus apparaissent dans une section « Synthèse assistée par IA » distincte des données et scores EPC, aussi bien à l'écran que dans les exports Word (section dédiée) et Excel (feuille « Synthèse_IA »).
+
 ## Structure
 
 - `app.py` : serveur local, base SQLite, API et calculs.

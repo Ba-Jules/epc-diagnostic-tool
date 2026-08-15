@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import unicodedata
 import uuid
 import zipfile
@@ -24,6 +25,8 @@ from io import StringIO
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import urllib.request
+import urllib.error
 from xml.etree import ElementTree as ET
 
 try:  # Used only to generate the downloadable Excel template; the app stays local.
@@ -93,6 +96,232 @@ EPC_DOMAINS = [
 
 GRADING = [(0, 22, 5), (23, 32, 10), (33, 39, 15), (40, 45, 20), (46, 50, 25), (51, 55, 30), (56, 59, 35), (60, 63, 40), (64, 67, 45), (68, 71, 50), (72, 74, 55), (75, 78, 60), (79, 81, 65), (82, 84, 70), (85, 87, 75), (88, 89, 80), (90, 92, 85), (93, 95, 90), (96, 98, 95), (99, 100, 100)]
 
+# ==================================================
+# ASSISTANT IA OPTIONNEL — couche multi-fournisseur
+# ==================================================
+# Aucune dépendance externe : requêtes HTTPS via urllib.request (stdlib).
+# La clé API ne quitte jamais ce module : jamais renvoyée par une route GET,
+# jamais journalisée, jamais écrite dans un export.
+
+AI_PROVIDERS = {
+    "gemini": {"label": "Google Gemini", "pricing": "GRATUIT", "family": "gemini",
+        "models": [("gemini-2.0-flash", "Recommandé"), ("gemini-1.5-flash", "Alternatif")],
+        "key_url": "https://aistudio.google.com/apikey"},
+    "groq": {"label": "Groq", "pricing": "GRATUIT", "family": "openai", "base_url": "https://api.groq.com/openai/v1",
+        "models": [("llama-3.3-70b-versatile", "Recommandé"), ("llama-3.1-8b-instant", "Rapide")],
+        "key_url": "https://console.groq.com/keys"},
+    "openrouter": {"label": "OpenRouter", "pricing": "GRATUIT", "family": "openai", "base_url": "https://openrouter.ai/api/v1",
+        "models": [("openrouter/free", "Recommandé — gratuit"), ("meta-llama/llama-3.1-8b-instruct:free", "Alternatif gratuit")],
+        "key_url": "https://openrouter.ai/keys"},
+    "cerebras": {"label": "Cerebras", "pricing": "ESSAI", "family": "openai", "base_url": "https://api.cerebras.ai/v1",
+        "models": [("llama3.1-8b", "Recommandé"), ("llama3.1-70b", "Alternatif")],
+        "key_url": "https://cloud.cerebras.ai/"},
+    "openai": {"label": "OpenAI", "pricing": "PAYANT", "family": "openai", "base_url": "https://api.openai.com/v1",
+        "models": [("gpt-4o-mini", "Recommandé"), ("gpt-4o", "Alternatif")],
+        "key_url": "https://platform.openai.com/api-keys"},
+    "anthropic": {"label": "Anthropic Claude", "pricing": "PAYANT", "family": "anthropic",
+        "models": [("claude-3-5-haiku-latest", "Recommandé"), ("claude-3-5-sonnet-latest", "Alternatif")],
+        "key_url": "https://console.anthropic.com/settings/keys"},
+    "deepseek": {"label": "DeepSeek", "pricing": "PAYANT", "family": "openai", "base_url": "https://api.deepseek.com/v1",
+        "models": [("deepseek-chat", "Recommandé"), ("deepseek-reasoner", "Raisonnement approfondi")],
+        "key_url": "https://platform.deepseek.com/api_keys"},
+    "xai": {"label": "xAI Grok", "pricing": "PAYANT", "family": "openai", "base_url": "https://api.x.ai/v1",
+        "models": [("grok-2-latest", "Recommandé")],
+        "key_url": "https://console.x.ai/"},
+}
+
+
+class AIError(Exception):
+    """Raised with a message safe to show the moderator (never a raw stack trace)."""
+
+
+def _http_json(url, headers, payload, timeout=25):
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        if e.code == 401 or e.code == 403:
+            raise AIError("Clé API invalide ou non autorisée.")
+        if e.code == 429:
+            raise AIError("Quota atteint pour ce fournisseur. Réessayez plus tard.")
+        if e.code == 404:
+            raise AIError("Modèle indisponible chez ce fournisseur.")
+        raise AIError(f"Le fournisseur IA a refusé la requête (code {e.code}).") from None
+    except urllib.error.URLError:
+        raise AIError("Connexion au fournisseur IA impossible.") from None
+    except TimeoutError:
+        raise AIError("Le fournisseur IA n'a pas répondu à temps.") from None
+
+
+def _call_openai_compatible(base_url, api_key, model, system_prompt, user_prompt):
+    data = _http_json(f"{base_url}/chat/completions", {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "temperature": 0.4})
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        raise AIError("Réponse du fournisseur IA illisible.") from None
+
+
+def _call_gemini(api_key, model, system_prompt, user_prompt):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    data = _http_json(url, {"Content-Type": "application/json"},
+        {"systemInstruction": {"parts": [{"text": system_prompt}]}, "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+         "generationConfig": {"temperature": 0.4}})
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (KeyError, IndexError, TypeError):
+        if data.get("promptFeedback", {}).get("blockReason"):
+            raise AIError("La demande a été bloquée par le fournisseur IA.") from None
+        raise AIError("Réponse du fournisseur IA illisible.") from None
+
+
+def _call_anthropic(api_key, model, system_prompt, user_prompt):
+    data = _http_json("https://api.anthropic.com/v1/messages",
+        {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        {"model": model, "max_tokens": 1200, "system": system_prompt, "messages": [{"role": "user", "content": user_prompt}]})
+    try:
+        return data["content"][0]["text"].strip()
+    except (KeyError, IndexError, TypeError):
+        raise AIError("Réponse du fournisseur IA illisible.") from None
+
+
+def generate_ai_response(provider: str, model: str, system_prompt: str, user_prompt: str, api_key: str) -> str:
+    cfg = AI_PROVIDERS.get(provider)
+    if not cfg:
+        raise AIError("Fournisseur IA inconnu.")
+    if not api_key:
+        raise AIError("Aucune clé API configurée pour ce fournisseur.")
+    family = cfg["family"]
+    if family == "openai":
+        return _call_openai_compatible(cfg["base_url"], api_key, model, system_prompt, user_prompt)
+    if family == "gemini":
+        return _call_gemini(api_key, model, system_prompt, user_prompt)
+    if family == "anthropic":
+        return _call_anthropic(api_key, model, system_prompt, user_prompt)
+    raise AIError("Fournisseur IA non implémenté.")
+
+
+def get_ai_config(db):
+    row = db.execute("SELECT enabled,provider,model,api_key FROM ai_config WHERE id=1").fetchone()
+    if not row:
+        return {"enabled": False, "provider": None, "model": None, "api_key": None}
+    return {"enabled": bool(row["enabled"]), "provider": row["provider"], "model": row["model"], "api_key": row["api_key"]}
+
+
+def require_ai(db):
+    cfg = get_ai_config(db)
+    if not cfg["enabled"]:
+        raise AIError("Assistant IA désactivé.")
+    if not cfg["provider"] or not cfg["api_key"]:
+        raise AIError("Assistant IA non configuré (fournisseur ou clé manquants).")
+    return cfg
+
+
+def _n(v):
+    return "—" if v is None else round(v, 1)
+
+
+AI_SYSTEM_BASE = ("Tu assistes un modérateur d'atelier de diagnostic organisationnel EPC/SENEVAL. "
+    "Tu interprètes des données déjà calculées ; tu ne recalcules jamais un score, tu n'inventes jamais un fait, "
+    "une cause, une conséquence ou une recommandation absente des données fournies. "
+    "Style professionnel, clair, factuel, sans jargon d'IA, sans formules comme « l'IA constate que ». Réponds en français.")
+
+
+def ai_epc_context(db, sid):
+    a = analysis(db, sid)
+    g = a["global"]
+    lines = [f"Atelier : {a['session']['name']}", f"Participants : {a['participantCount']} · questionnaires validés : {a['completedCount']}",
+        f"Capacité globale : {_n(g['capacity'])}/100 · Consensus global : {_n(g['consensus'])}/100 "
+        f"(graduées : capacité {g['gradedCapacity']}, consensus {g['gradedConsensus']})", "", "Résultats par domaine :"]
+    for d in a["domains"]:
+        if d["capacity"] is None: continue
+        lines.append(f"- {d['label']} : capacité {_n(d['capacity'])}, consensus {_n(d['consensus'])} "
+            f"(graduées {d['gradedCapacity']}/{d['gradedConsensus']}), {d['responses']} répondant(s)")
+        for i in d["indicators"]:
+            if i["capacity"] is None: continue
+            lines.append(f"    · {i['label']} : capacité {_n(i['capacity'])}, consensus {_n(i['consensus'])}")
+    return "\n".join(lines)
+
+
+def ai_priority_context(db, sid, pid):
+    q = qualitative_data(db, sid)
+    p = next((x for x in q["priorities"] if x["id"] == pid), None)
+    if not p:
+        raise AIError("Priorité introuvable.")
+    an = next((x for x in q["analyses"] if x["priority_id"] == pid), None)
+    entries = [e for e in q["entries"] if e["priority_id"] == pid]
+    def block(kind, label):
+        items = [e for e in entries if e["kind"] == kind]
+        if not items: return f"{label} déjà saisi(e)s : aucun."
+        return f"{label} déjà saisi(e)s :\n" + "\n".join(f"  - [{e['validation_status']}] {e['content']}" for e in items)
+    lines = [f"Domaine : {p['domain_label']}", f"Indicateur : {p['indicator_code']} — {p['indicator_label']}",
+        f"Description : {p['indicator_description']}", f"Constat déjà saisi : {an['problem'] if an and an['problem'] else 'aucun'}",
+        block("cause", "Causes"), block("consequence", "Conséquences"), block("lever", "Leviers")]
+    return p, an, entries, "\n".join(lines)
+
+
+def log_ai_suggestion(db, sid, kind, target_id, provider, model):
+    sug_id = str(uuid.uuid4())
+    db.execute("INSERT INTO ai_suggestions VALUES (?,?,?,?,?,?,?,?,?)", (sug_id, sid, kind, target_id, provider, model, "proposed", now(), now()))
+    db.commit()
+    return sug_id
+
+
+def _parse_json_list(text):
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"): t = t[4:]
+        t = t.strip()
+    try:
+        val = json.loads(t)
+        return val if isinstance(val, list) else [val]
+    except (json.JSONDecodeError, ValueError):
+        m = re.search(r"\[.*\]", t, re.S)
+        if m:
+            try: return json.loads(m.group(0))
+            except (json.JSONDecodeError, ValueError): pass
+        raise AIError("Réponse du fournisseur IA illisible (format inattendu).") from None
+
+
+AI_SECTION_LABELS = {
+    "resume_executif": "Résumé exécutif", "lecture_diagnostic": "Lecture du diagnostic",
+    "synthese_domaines": "Synthèse par domaine", "synthese_priorites": "Synthèse des priorités",
+    "synthese_recommandations": "Synthèse des recommandations", "synthese_formations": "Synthèse des besoins de formation",
+    "synthese_plan": "Synthèse du plan d'action", "conclusion": "Conclusion générale proposée",
+}
+AI_REPORT_SECTIONS = {
+    "resume_executif": "Rédige un RÉSUMÉ EXÉCUTIF de l'atelier : situation générale, principaux constats, points forts, points de vigilance, priorités retenues, principales orientations.",
+    "lecture_diagnostic": "Rédige une LECTURE DU DIAGNOSTIC : tendances, écarts, convergences, divergences, domaines remarquables, à partir de la capacité et du consensus.",
+    "synthese_domaines": "Rédige une SYNTHÈSE PAR DOMAINE : pour chaque domaine, résultat et interprétation prudente, en lien avec les analyses validées si disponibles.",
+    "synthese_priorites": "Rédige une SYNTHÈSE DES PRIORITÉS : priorités retenues, constats, causes validées, leviers retenus.",
+    "synthese_recommandations": "Rédige une SYNTHÈSE DES RECOMMANDATIONS retenues, regroupées en catégories cohérentes si pertinent.",
+    "synthese_formations": "Rédige une SYNTHÈSE DES BESOINS DE FORMATION retenus.",
+    "synthese_plan": "Rédige une SYNTHÈSE DU PLAN D'ACTION à partir des recommandations retenues.",
+    "conclusion": "Propose une CONCLUSION GÉNÉRALE concise et institutionnelle. Précise qu'il s'agit d'une proposition, pas d'une décision validée.",
+}
+
+
+def ai_report_context(db, sid):
+    r = report_data(db, sid)
+    q, m = r["qualitative"], r["meta"]
+    lines = [ai_epc_context(db, sid), "", f"Contexte de l'atelier : {m.get('context') or 'non renseigné'}", "", "Priorités et analyses validées :"]
+    for p in q["priorities"]:
+        an = next((x for x in q["analyses"] if x["priority_id"] == p["id"]), None)
+        retained = [e for e in q["entries"] if e["priority_id"] == p["id"] and e["validation_status"] == "RETENU"]
+        lines.append(f"- {p['domain_label']} — {p['indicator_label']} : constat="
+            f"{an['problem'] if an and an['problem'] else 'non renseigné'} ; "
+            f"causes={'; '.join(e['content'] for e in retained if e['kind']=='cause') or 'aucune'} ; "
+            f"leviers={'; '.join(e['content'] for e in retained if e['kind']=='lever') or 'aucun'}")
+    lines.append("\nRecommandations retenues :")
+    kept_recs = [x for x in q["recommendations"] if x["status"] == "Retenue"]
+    lines += ([f"- {x['title']} : {x['description']}" for x in kept_recs] or ["  aucune"])
+    lines.append("\nThèmes de formation :")
+    lines += ([f"- {t['title']} : {t['need_text'] or ''}" for t in q["trainingTopics"]] or ["  aucun"])
+    return "\n".join(lines)
+
 
 def connect(path: Path = DATABASE) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +347,9 @@ def init_db(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS workshop_recommendations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), priority_id TEXT REFERENCES priorities(id), cause_id TEXT REFERENCES analysis_entries(id), lever_id TEXT REFERENCES analysis_entries(id), title TEXT NOT NULL, description TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Autre', priority_level TEXT NOT NULL DEFAULT 'Non définie', owner TEXT, horizon TEXT, comment TEXT, status TEXT NOT NULL DEFAULT 'Proposée', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS training_topics (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), priority_id TEXT REFERENCES priorities(id), recommendation_id TEXT REFERENCES workshop_recommendations(id), title TEXT NOT NULL, need_text TEXT, target_audience TEXT, priority_level TEXT NOT NULL DEFAULT 'Non définie', comment TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS session_report_meta (session_id TEXT PRIMARY KEY REFERENCES sessions(id), facilitator TEXT, audience TEXT, context TEXT, conclusion TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS ai_config (id INTEGER PRIMARY KEY CHECK (id=1), enabled INTEGER NOT NULL DEFAULT 0, provider TEXT, model TEXT, api_key TEXT, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS ai_suggestions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), kind TEXT NOT NULL, target_id TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS report_ai_blocks (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), section_key TEXT NOT NULL, content TEXT NOT NULL, retained_at TEXT NOT NULL, UNIQUE(session_id, section_key));
     """)
     db.commit()
     existing_columns = {r["name"] for r in db.execute("PRAGMA table_info(participants)")}
@@ -225,6 +457,12 @@ def report_xlsx(db,sid):
     sheets=[("Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],a['global']['consensus']]]),("Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],i['consensus'],i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
     for name,head,data in sheets:
         s=wb.add_worksheet(name);s.write_row(0,0,head,h);[s.write_row(n+1,0,row) for n,row in enumerate(data)];s.set_column(0,len(head)-1,24)
+    ai_blocks=rows(db,"SELECT section_key,content FROM report_ai_blocks WHERE session_id=?",(sid,))
+    if ai_blocks:
+        wrap=wb.add_format({"text_wrap":True,"valign":"top"})
+        ai_sheet=wb.add_worksheet("Synthèse_IA"); ai_sheet.write_row(0,0,["Section","Contenu proposé par l'assistant IA, retenu par le modérateur"],h)
+        for n,b in enumerate(ai_blocks): ai_sheet.write_row(n+1,0,[AI_SECTION_LABELS.get(b['section_key'],b['section_key']),b['content']],wrap)
+        ai_sheet.set_column(0,0,28); ai_sheet.set_column(1,1,110)
     domains=[d for d in a['domains'] if d.get('capacity') is not None]
     if PILImage is not None and domains:
         gs=wb.add_worksheet("Graphiques"); gs.set_column(0,0,4); row=1
@@ -730,6 +968,18 @@ def report_docx(db, sid):
     docx_style_heading(doc.add_heading("Priorités retenues", level=2))
     doc.add_paragraph(f"{len(priorities)} priorité(s) sélectionnée(s)." if priorities else "Aucune priorité sélectionnée.")
 
+    ai_blocks = rows(db, "SELECT section_key,content FROM report_ai_blocks WHERE session_id=?", (sid,))
+    if ai_blocks:
+        doc.add_page_break()
+        docx_style_heading(doc.add_heading("Synthèse assistée par IA", level=2))
+        docx_note(doc, "Propositions rédigées avec l'aide de l'assistant IA et explicitement retenues par le modérateur. "
+            "Les données, scores et graphiques EPC ci-dessus restent la source primaire du diagnostic.", italic=False)
+        for key in AI_SECTION_LABELS:
+            block = next((b for b in ai_blocks if b["section_key"] == key), None)
+            if not block: continue
+            docx_style_heading(doc.add_heading(AI_SECTION_LABELS[key], level=3))
+            doc.add_paragraph(block["content"])
+
     out = BytesIO(); doc.save(out); return out.getvalue()
 
 PDF_STOPWORDS = {"de", "des", "du", "la", "le", "les", "et", "en", "au", "aux", "à", "a", "l"}
@@ -960,6 +1210,13 @@ class Handler(SimpleHTTPRequestHandler):
                 sid = path.split("/")[3]; buf = StringIO(); writer = csv.writer(buf); writer.writerow(["participant", "nom / organisation", "indicator", "value", "updated_at"])
                 for r in db.execute("SELECT p.anonymous_id,p.display_name,i.code,r.value_json,r.updated_at FROM responses r JOIN participants p ON p.id=r.participant_id JOIN indicators i ON i.id=r.indicator_id WHERE r.session_id=?", (sid,)): writer.writerow(r)
                 data = buf.getvalue().encode(); name=export_filename(session_label(db,sid),"reponses",ext="csv"); self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.end_headers(); self.wfile.write(data); return
+            if path.startswith("/api/sessions/") and path.endswith("/ai/report-blocks"):
+                sid = path.split("/")[3]
+                return self.json(200, rows(db, "SELECT section_key,content,retained_at FROM report_ai_blocks WHERE session_id=?", (sid,)))
+            if path == "/api/ai/config":
+                cfg = get_ai_config(db)
+                return self.json(200, {"enabled": cfg["enabled"], "provider": cfg["provider"], "model": cfg["model"], "keyConfigured": bool(cfg["api_key"]),
+                    "providers": {k: {"label": v["label"], "pricing": v["pricing"], "models": v["models"], "keyUrl": v["key_url"]} for k, v in AI_PROVIDERS.items()}})
             if path == "/api/participant":
                 sid, pid = query.get("session", [None])[0], query.get("participant", [None])[0]
                 participant = db.execute("SELECT * FROM participants WHERE id=? AND session_id=?", (pid, sid)).fetchone()
@@ -977,6 +1234,152 @@ class Handler(SimpleHTTPRequestHandler):
             except ValueError as e: return self.json(400,{"error":str(e)})
         data, db = self.body(), self.db()
         try:
+            if path == "/api/ai/test":
+                try:
+                    cfg = require_ai(db)
+                    t0 = time.time()
+                    sample = generate_ai_response(cfg["provider"], cfg["model"], "Réponds uniquement par le mot OK.", "Confirme que la connexion fonctionne.", cfg["api_key"])
+                    return self.json(200, {"ok": True, "provider": AI_PROVIDERS[cfg["provider"]]["label"], "model": cfg["model"], "latencyMs": int((time.time()-t0)*1000)})
+                except AIError as e: return self.json(200, {"ok": False, "reason": str(e)})
+
+            if path.startswith("/api/sessions/") and path.endswith("/ai/diagnostic"):
+                sid = path.split("/")[3]
+                try:
+                    cfg = require_ai(db)
+                    context = ai_epc_context(db, sid)
+                    system = AI_SYSTEM_BASE + (" Analyse conjointement capacité et consensus pour les domaines remarquables "
+                        "(faible capacité + consensus élevé = constat partagé par le groupe ; faible capacité + consensus faible = perceptions divergentes ; "
+                        "capacité élevée + consensus élevé = force reconnue ; capacité élevée + consensus faible = expérience hétérogène). "
+                        "Structure ta réponse avec exactement ces titres, en majuscules : POINTS SAILLANTS / POINTS DE VIGILANCE / "
+                        "CONTRASTES CAPACITÉ / CONSENSUS / QUESTIONS À APPROFONDIR AVEC LE GROUPE. Reste concis et exploitable en atelier.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    sug_id = log_ai_suggestion(db, sid, "diagnostic", None, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "text": text})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and "/ai/priority/" in path and path.endswith("/prepare"):
+                parts = path.split("/"); sid, pid = parts[3], parts[6]
+                try:
+                    cfg = require_ai(db)
+                    _, _, _, context = ai_priority_context(db, sid, pid)
+                    system = AI_SYSTEM_BASE + (" Pour cette priorité, propose uniquement : 1) un constat reformulé à partir des seules données fournies, "
+                        "2) des questions à poser au groupe, 3) les points nécessitant clarification. Ne propose ni cause ni recommandation ici.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    sug_id = log_ai_suggestion(db, sid, "priority_prepare", pid, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "text": text})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and "/ai/priority/" in path and path.endswith("/entries"):
+                parts = path.split("/"); sid, pid = parts[3], parts[6]
+                kind = data.get("kind")
+                if kind not in ("cause", "consequence", "lever"): return self.json(400, {"error": "Type d'hypothèse invalide."})
+                try:
+                    cfg = require_ai(db)
+                    _, _, _, context = ai_priority_context(db, sid, pid)
+                    kind_fr = {"cause": "des hypothèses de CAUSES", "consequence": "des CONSÉQUENCES possibles", "lever": "des LEVIERS d'action possibles"}[kind]
+                    system = AI_SYSTEM_BASE + (f" Propose 3 à 5 {kind_fr} pour cette priorité, formulées comme des hypothèses à discuter — "
+                        "jamais présentées comme établies (n'écris jamais « cause identifiée »). "
+                        "Réponds uniquement par une liste, une hypothèse par ligne, sans numérotation ni tiret, sans autre texte.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    items = [l.strip("-•* ").strip() for l in text.split("\n") if l.strip()]
+                    sug_id = log_ai_suggestion(db, sid, f"priority_{kind}", pid, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "items": items})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and path.endswith("/ai/recommendations"):
+                sid = path.split("/")[3]
+                try:
+                    cfg = require_ai(db)
+                    q = qualitative_data(db, sid)
+                    retained = [e for e in q["entries"] if e["validation_status"] == "RETENU"]
+                    chain_lines = []
+                    for p in q["priorities"]:
+                        an = next((x for x in q["analyses"] if x["priority_id"] == p["id"]), None)
+                        causes = [e["content"] for e in retained if e["priority_id"] == p["id"] and e["kind"] == "cause"]
+                        levers = [e["content"] for e in retained if e["priority_id"] == p["id"] and e["kind"] == "lever"]
+                        if not causes and not levers: continue
+                        chain_lines.append(f"Priorité (id={p['id']}) : {p['domain_label']} — {p['indicator_label']}\n"
+                            f"Constat : {an['problem'] if an and an['problem'] else 'non renseigné'}\n"
+                            f"Causes validées : {'; '.join(causes) or 'aucune'}\nLeviers validés : {'; '.join(levers) or 'aucun'}")
+                    if not chain_lines:
+                        return self.json(200, {"id": None, "items": [], "note": "Aucune cause ni levier validé par le groupe pour l'instant : rien à proposer."})
+                    context = "\n\n".join(chain_lines)
+                    system = AI_SYSTEM_BASE + (" Pour chaque priorité listée, propose une ou deux recommandations d'action fondées UNIQUEMENT "
+                        "sur les causes/leviers validés fournis — ne produis pas de liste générique de bonnes pratiques sans lien avec ces données. "
+                        "Réponds en JSON strict, uniquement une liste d'objets avec ces clés : priorityId, title, description, category, "
+                        "priorityLevel (Haute, Moyenne ou Basse), owner, horizon. Aucun texte hors JSON.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    items = _parse_json_list(text)
+                    sug_id = log_ai_suggestion(db, sid, "recommendation", None, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "items": items})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and path.endswith("/ai/training"):
+                sid = path.split("/")[3]
+                try:
+                    cfg = require_ai(db)
+                    q = qualitative_data(db, sid)
+                    recs = q["recommendations"]
+                    if not recs:
+                        return self.json(200, {"id": None, "items": [], "note": "Aucune recommandation disponible : rien à proposer."})
+                    context = "\n".join(f"- {r['title']} : {r['description']} (catégorie {r['category']})" for r in recs)
+                    system = AI_SYSTEM_BASE + (" À partir de ces recommandations, identifie les besoins de formation qu'elles font apparaître. "
+                        "Réponds en JSON strict, uniquement une liste d'objets avec ces clés : title, targetAudience, needText, "
+                        "priorityLevel (Haute, Moyenne ou Basse). Aucun texte hors JSON.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    items = _parse_json_list(text)
+                    sug_id = log_ai_suggestion(db, sid, "training", None, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "items": items})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and path.endswith("/ai/plan"):
+                sid = path.split("/")[3]
+                try:
+                    cfg = require_ai(db)
+                    q = qualitative_data(db, sid)
+                    retained = [r for r in q["recommendations"] if r["status"] == "Retenue"]
+                    if not retained:
+                        return self.json(200, {"id": None, "items": [], "note": "Aucune recommandation retenue pour l'instant : rien à structurer."})
+                    context = "\n".join(f"- {r['title']} : {r['description']} (responsable : {r['owner'] or 'non renseigné'}, "
+                        f"échéance : {r['horizon'] or 'non renseignée'})" for r in retained)
+                    system = AI_SYSTEM_BASE + (" Structure ces recommandations retenues en plan d'action. N'invente aucun engagement organisationnel : "
+                        "si un responsable ou une échéance ne sont pas fournis dans les données, indique-le explicitement plutôt que d'en inventer un. "
+                        "Réponds en JSON strict, uniquement une liste d'objets avec ces clés : action, owner, horizon, expectedResult, "
+                        "indicator, dependencies. Aucun texte hors JSON.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    items = _parse_json_list(text)
+                    sug_id = log_ai_suggestion(db, sid, "plan", None, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "items": items})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and path.endswith("/ai/report/section"):
+                sid = path.split("/")[3]
+                section = data.get("section")
+                if section not in AI_REPORT_SECTIONS: return self.json(400, {"error": "Section de rapport invalide."})
+                try:
+                    cfg = require_ai(db)
+                    context = ai_report_context(db, sid)
+                    system = AI_SYSTEM_BASE + " " + AI_REPORT_SECTIONS[section] + (" N'invente aucune étape non réalisée : si les données "
+                        "nécessaires sont absentes, indique-le sobrement plutôt que d'inventer un contenu.")
+                    text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    sug_id = log_ai_suggestion(db, sid, f"report_{section}", None, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "section": section, "text": text})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
+            if path.startswith("/api/sessions/") and path.endswith("/ai/report/full"):
+                sid = path.split("/")[3]
+                try:
+                    cfg = require_ai(db)
+                    context = ai_report_context(db, sid)
+                    results = {}
+                    for section, instruction in AI_REPORT_SECTIONS.items():
+                        system = AI_SYSTEM_BASE + " " + instruction + (" N'invente aucune étape non réalisée : si les données "
+                            "nécessaires sont absentes, indique-le sobrement plutôt que d'inventer un contenu.")
+                        results[section] = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
+                    sug_id = log_ai_suggestion(db, sid, "report_full", None, cfg["provider"], cfg["model"])
+                    return self.json(200, {"id": sug_id, "sections": results})
+                except AIError as e: return self.json(409, {"error": str(e)})
+
             if path == "/api/templates": return self.json(201,{"id":create_blank_template(db,data)})
             if path == "/api/templates/import/confirm":
                 preview=IMPORTS.pop(data.get("token"),None)
@@ -1028,6 +1431,19 @@ class Handler(SimpleHTTPRequestHandler):
     def do_PUT(self):
         path, data, db = urlparse(self.path).path, self.body(), self.db()
         try:
+            if path == "/api/ai/config":
+                if data.get("provider") and data["provider"] not in AI_PROVIDERS: return self.json(400, {"error": "Fournisseur IA inconnu."})
+                cur = get_ai_config(db)
+                api_key = data["apiKey"] if data.get("apiKey") else cur["api_key"]
+                db.execute("INSERT INTO ai_config (id,enabled,provider,model,api_key,updated_at) VALUES (1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,provider=excluded.provider,model=excluded.model,api_key=excluded.api_key,updated_at=excluded.updated_at",
+                    (int(bool(data.get("enabled"))), data.get("provider"), data.get("model"), api_key, now()))
+                db.commit(); return self.json(200, {"ok": True})
+            if path.startswith("/api/sessions/") and path.endswith("/ai/report-block"):
+                sid = path.split("/")[3]; section = data.get("sectionKey"); content = data.get("content", "")
+                if section not in AI_REPORT_SECTIONS: return self.json(400, {"error": "Section de rapport invalide."})
+                db.execute("INSERT INTO report_ai_blocks (id,session_id,section_key,content,retained_at) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(session_id,section_key) DO UPDATE SET content=excluded.content,retained_at=excluded.retained_at",
+                    (str(uuid.uuid4()), sid, section, content, now())); db.commit(); return self.json(200, {"ok": True})
             if path.startswith("/api/sessions/"):
                 sid=path.split("/")[3]; expected=int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None,"") else None
                 if data.get("templateId"):
@@ -1041,6 +1457,10 @@ class Handler(SimpleHTTPRequestHandler):
                 pid=path.split("/")[3]; db.execute("UPDATE participants SET display_name=? WHERE id=?",(data.get("displayName") or None,pid)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
                 db.execute("UPDATE priority_analyses SET problem=?,updated_at=? WHERE id=?",(data.get("problem",""),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
+            if path.startswith("/api/ai-suggestions/"):
+                status = data.get("status")
+                if status not in ("proposed", "modified", "retained", "rejected"): return self.json(400, {"error": "Statut invalide."})
+                db.execute("UPDATE ai_suggestions SET status=?,updated_at=? WHERE id=?", (status, now(), path.split("/")[3])); db.commit(); return self.json(200, {"ok": True})
             if path.startswith("/api/analysis-entries/"):
                 db.execute("UPDATE analysis_entries SET parent_id=?,content=?,item_type=?,comment=?,validation_status=?,updated_at=? WHERE id=?",(data.get("parentId") or None,data["content"],data.get("itemType") or None,data.get("comment") or None,data.get("validationStatus","A_DISCUTER"),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/recommendations-v2/"):
@@ -1062,6 +1482,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_DELETE(self):
         path, db=urlparse(self.path).path,self.db()
         try:
+            if path.startswith("/api/sessions/") and "/ai/report-block/" in path:
+                sid=path.split("/")[3]; section=path.rsplit("/",1)[1]
+                db.execute("DELETE FROM report_ai_blocks WHERE session_id=? AND section_key=?",(sid,section)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/analysis-entries/"):
                 eid=path.split("/")[3]; dependent=db.execute("SELECT COUNT(*) FROM workshop_recommendations WHERE cause_id=? OR lever_id=?",(eid,eid)).fetchone()[0]
                 if dependent and parse_qs(urlparse(self.path).query).get("force",["0"])[0] != "1": return self.json(409,{"error":f"Cette entrée est utilisée par {dependent} recommandation(s). Confirmez la suppression.","dependencies":dependent})

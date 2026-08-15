@@ -197,6 +197,20 @@ form>button,form>.row>button{width:auto}
 .badge-info{background:var(--blue-50);color:var(--blue-700)}
 .badge-danger{background:var(--red-50);color:var(--red-600)}
 
+/* ---------- Assistant IA (facultatif) ---------- */
+.ai-badge{display:inline-flex;align-items:center;gap:.3rem;padding:.22rem .62rem;border-radius:999px;font-size:.7rem;font-weight:700;letter-spacing:.02em;white-space:nowrap;background:var(--gray-100);color:var(--gray-700);vertical-align:middle}
+.ai-badge:empty{display:none}
+.ai-badge[data-pricing="GRATUIT"]{background:var(--green-50);color:var(--green-600)}
+.ai-badge[data-pricing="ESSAI"]{background:var(--orange-50);color:var(--orange-600)}
+.ai-badge[data-pricing="PAYANT"]{background:var(--gray-100);color:var(--gray-700)}
+button.ai-btn{background:var(--blue-50);color:var(--blue-700);border:1px solid var(--blue-50)}
+button.ai-btn:hover{background:var(--blue-600);color:#fff}
+.ai-suggestion{border:1px dashed var(--blue-600);background:var(--blue-50)}
+.ai-suggestion .section-header h3{color:var(--blue-700)}
+.ai-item{border-top:1px solid var(--gray-200);padding-top:.6rem;margin-top:.6rem}
+.ai-item:first-of-type{border-top:0;padding-top:0;margin-top:0}
+.ai-edit-area{background:#fff}
+
 /* ---------- Home: hero actions ---------- */
 .hero-lead{margin:.2rem 0 1.1rem}
 .hero-lead h2{font-size:1.4rem}
