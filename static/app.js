@@ -44,6 +44,9 @@ function helpPanel(){
     </ol>
     <h3>Vocabulaire</h3>
     <p><b>Domaine</b> : grande thématique de capacité organisationnelle (ex. Gestion des ressources humaines). <b>Indicateur</b> : question notée par les participants au sein d’un domaine. <b>Capacité</b> : moyenne des notes, ramenée sur 100. <b>Consensus</b> : degré d’accord entre participants (dispersion des notes). <b>Priorité</b> : indicateur retenu pour analyse approfondie et recommandations.</p>
+    <h3>Assistant IA (facultatif)</h3>
+    <p>Un assistant IA peut être activé depuis <b>Configuration → 5 · Assistant IA</b>, en choisissant un fournisseur (Gemini, Groq, OpenRouter, Cerebras, OpenAI, Anthropic, DeepSeek ou xAI Grok) et en collant une clé API. <b>L’outil fonctionne intégralement sans lui</b> : par défaut il est désactivé et aucun calcul EPC n’en dépend.</p>
+    <p>Une fois activé, des boutons « ✦ » apparaissent au diagnostic, à l’analyse des priorités (constat, causes, conséquences, leviers), aux recommandations, aux formations, au plan d’action et au rapport final. Chaque suggestion s’affiche dans un encart modifiable et <b>n’est enregistrée que si vous cliquez sur « Retenir »</b> — l’IA ne choisit et ne valide jamais rien à la place du groupe. Votre clé API reste sur le serveur : elle n’est jamais visible du participant ni renvoyée au navigateur.</p>
     <button class="secondary help-close" onclick="this.closest('.help-modal').remove()">Fermer</button>
   </div>`;
 }
