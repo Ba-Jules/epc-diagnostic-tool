@@ -1,0 +1,12 @@
+services:
+  epc-diagnostic:
+    build: .
+    container_name: epc-diagnostic
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - epc-data:/app/data
+
+volumes:
+  epc-data:

@@ -1,0 +1,16 @@
+data/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.xlsx
+*.docx
+*.pdf
+*.csv
+server.log
+proposition_gemini/
+archive.zip
+*.JPG
+*.png
+consignes_claude.txt
+!requirements.txt

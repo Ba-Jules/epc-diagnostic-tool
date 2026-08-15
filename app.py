@@ -10,6 +10,7 @@ import csv
 import base64
 import json
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -1100,8 +1101,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     db=connect(); init_db(db); db.close()
-    server=ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
-    print("EPC Workshop Engine: http://127.0.0.1:8000")
+    host=os.environ.get("HOST","127.0.0.1")
+    port=int(os.environ.get("PORT","8000"))
+    server=ThreadingHTTPServer((host, port), Handler)
+    print(f"EPC Workshop Engine: http://{host}:{port}")
     server.serve_forever()
 
 if __name__ == "__main__": main()
