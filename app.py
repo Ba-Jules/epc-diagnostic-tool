@@ -106,7 +106,7 @@ def init_db(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, version INTEGER NOT NULL, description TEXT, status TEXT NOT NULL, scale_json TEXT NOT NULL, scoring_json TEXT NOT NULL, consensus_json TEXT NOT NULL, grading_json TEXT NOT NULL, priority_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(name, version));
     CREATE TABLE IF NOT EXISTS domains (id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES templates(id), code TEXT NOT NULL, label TEXT NOT NULL, description TEXT, display_order INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS indicators (id TEXT PRIMARY KEY, domain_id TEXT NOT NULL REFERENCES domains(id), code TEXT NOT NULL, label TEXT NOT NULL, description TEXT, response_type TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 1, display_order INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, configuration_json TEXT NOT NULL DEFAULT '{}');
-    CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES templates(id), template_version INTEGER NOT NULL, name TEXT NOT NULL, organization TEXT, location TEXT, date TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT);
+    CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES templates(id), template_version INTEGER NOT NULL, name TEXT NOT NULL, organization TEXT, location TEXT, date TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, description TEXT, expected_participants INTEGER);
     CREATE TABLE IF NOT EXISTS participants (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), anonymous_id TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, display_name TEXT, UNIQUE(session_id, anonymous_id));
     CREATE TABLE IF NOT EXISTS responses (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), participant_id TEXT NOT NULL REFERENCES participants(id), indicator_id TEXT NOT NULL REFERENCES indicators(id), value_json TEXT NOT NULL, value_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(participant_id, indicator_id));
     CREATE TABLE IF NOT EXISTS priorities (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), domain_id TEXT NOT NULL REFERENCES domains(id), indicator_id TEXT NOT NULL REFERENCES indicators(id), votes INTEGER NOT NULL DEFAULT 0, selected_at TEXT NOT NULL, UNIQUE(session_id, indicator_id));
@@ -123,6 +123,11 @@ def init_db(db: sqlite3.Connection) -> None:
     if "display_name" not in existing_columns:
         db.execute("ALTER TABLE participants ADD COLUMN display_name TEXT")
         db.commit()
+    session_columns = {r["name"] for r in db.execute("PRAGMA table_info(sessions)")}
+    for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER")):
+        if col not in session_columns:
+            db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+    db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
 
@@ -672,8 +677,8 @@ def report_docx(db, sid):
     docx_metrics_row(doc, [
         ("Capacité", pdf_fmt(g["capacity"])),
         ("Consensus", pdf_fmt(g["consensus"])),
-        ("Capacité graduée", g["gradedCapacity"] if g["gradedCapacity"] is not None else "—"),
-        ("Consensus gradué", g["gradedConsensus"] if g["gradedConsensus"] is not None else "—"),
+        ("Capacité graduée", pdf_fmt(g["gradedCapacity"])),
+        ("Consensus gradué", pdf_fmt(g["gradedConsensus"])),
     ])
 
     if not domains or PILImage is None:
@@ -825,23 +830,16 @@ def save_import(db, data):
 def grade(value, norm):
     """Classify value into a graduated band from norm (low, high, result) tuples.
 
-    The bands are authored with integer bounds (e.g. 0-22, then 23-32), leaving a
-    gap for any fractional value landing between two consecutive bounds (e.g.
-    22.5) — capacity/consensus are continuous means, not integers, so that gap
-    silently dropped real scores to None. Each band's effective upper edge is
-    therefore extended up to (but excluding) the next band's low bound, instead
-    of relying on the band's own recorded high, which only closes the gaps
-    without changing any authored bound or result value.
+    Matches the reference KOICA calculation tool: the continuous standardized
+    score is rounded to the nearest whole number first, then looked up against
+    the bands' own authored integer bounds (which are contiguous once rounded,
+    e.g. ...59-63, 64-67, 68-71... — no gap-filling needed post-rounding).
     """
     if value is None:
         return None
-    v = max(0.0, min(100.0, float(value)))
-    n = len(norm)
-    for i, (low, high, result) in enumerate(norm):
-        if i + 1 < n:
-            if low <= v < norm[i + 1][0]:
-                return result
-        elif low <= v <= high:
+    v = round(max(0.0, min(100.0, float(value))))
+    for low, high, result in norm:
+        if low <= v <= high:
             return result
     return None
 
@@ -877,12 +875,19 @@ def analysis(db, session_id: str):
         dcap = dmean / high * output_max if dmean is not None else None
         dcons = max(0, output_max - consensus["factor"] * (dsd / amplitude * output_max)) if dsd is not None else None
         output_domains.append({"id": domain["id"], "code": domain["code"], "label": domain["label"], "responses": len(person_scores), "capacity": dcap, "dispersion": dsd, "consensus": dcons, "gradedCapacity": grade(dcap, norm) if dcap is not None else None, "gradedConsensus": grade(dcons, norm) if dcons is not None else None, "indicators": output_indicators})
-    global_mean = sum(all_values) / len(all_values) if all_values else None
-    global_capacity = global_mean / high * 100 if global_mean is not None else None
+    # Mirrors the reference KOICA tool's "Moyenne" row: global capacity/consensus
+    # (standardized and graduated alike) are unweighted averages across domains,
+    # not a response-weighted pool of every individual answer. The graduated
+    # global score in particular averages the domains' own graduated scores —
+    # it is not grade() applied to the averaged standardized score.
     domain_caps=[d["capacity"] for d in output_domains if d["capacity"] is not None]; domain_cons=[d["consensus"] for d in output_domains if d["consensus"] is not None]
+    global_capacity=sum(domain_caps)/len(domain_caps) if domain_caps else None
     gc=sum(domain_cons)/len(domain_cons) if domain_cons else None
+    graded_caps=[d["gradedCapacity"] for d in output_domains if d["gradedCapacity"] is not None]; graded_cons=[d["gradedConsensus"] for d in output_domains if d["gradedConsensus"] is not None]
+    global_graded_capacity=sum(graded_caps)/len(graded_caps) if graded_caps else None
+    global_graded_consensus=sum(graded_cons)/len(graded_cons) if graded_cons else None
     participants=len(rows(db,"SELECT id FROM participants WHERE session_id=?",(session_id,))); completed=len(rows(db,"SELECT id FROM participants WHERE session_id=? AND status='completed'",(session_id,)))
-    return {"session": dict(session), "participantCount": participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "gradedCapacity": grade(global_capacity, norm) if global_capacity is not None else None, "gradedConsensus":grade(gc,norm) if gc is not None else None}}
+    return {"session": dict(session), "participantCount": participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
 
 
 def qualitative_data(db, session_id: str):
@@ -982,7 +987,7 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/sessions":
                 template = template_payload(db, data["templateId"])
                 if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]): return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
-                sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None)); db.commit(); return self.json(201, {"id": sid})
+                sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None)); db.commit(); return self.json(201, {"id": sid})
             if path.endswith("/participants"):
                 sid = path.split("/")[3]; session = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
                 if not session or session["status"] != "open": return self.json(409, {"error": "Collecte fermée"})
@@ -1020,7 +1025,7 @@ class Handler(SimpleHTTPRequestHandler):
         path, data, db = urlparse(self.path).path, self.body(), self.db()
         try:
             if path.startswith("/api/sessions/"):
-                sid=path.split("/")[3]; db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),sid)); db.commit(); return self.json(200,{"ok":True})
+                sid=path.split("/")[3]; db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None,"") else None,sid)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/participants/"):
                 pid=path.split("/")[3]; db.execute("UPDATE participants SET display_name=? WHERE id=?",(data.get("displayName") or None,pid)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
