@@ -1,4 +1,4 @@
-const app=document.querySelector('#app'),esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),fmt=v=>v==null?'—':Number(v).toFixed(1); function notice(message){let n=document.querySelector('#notice');if(!n){n=document.createElement('div');n.id='notice';n.className='notice';document.body.appendChild(n)}n.innerHTML=`<div><b>Information</b><p>${esc(message)}</p><button onclick="this.closest('.notice').remove()">Fermer</button></div>`} const api=(p,o={})=>fetch(p,{headers:{'Content-Type':'application/json'},...o}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error||'Action impossible.');return x}); window.addEventListener('unhandledrejection',e=>{e.preventDefault();notice(e.reason?.message||'Action impossible. Veuillez réessayer.');}); window.addEventListener('error',e=>{if(e.message)notice('Une action ne peut pas être réalisée : '+e.message)});let T=[],S=[];
+const app=document.querySelector('#app'),esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),fmt=v=>v==null?'—':Number(v).toFixed(1); function notice(message){let n=document.querySelector('#notice');if(!n){n=document.createElement('div');n.id='notice';document.body.appendChild(n)}n.className='notice';n.innerHTML=`<div><b>Information</b><p>${esc(message)}</p><button onclick="this.closest('.notice').remove()">Fermer</button></div>`} const api=(p,o={})=>fetch(p,{headers:{'Content-Type':'application/json'},...o}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error||'Action impossible.');return x}); window.addEventListener('unhandledrejection',e=>{e.preventDefault();notice(e.reason?.message||'Action impossible. Veuillez réessayer.');}); window.addEventListener('error',e=>{if(e.message)notice('Une action ne peut pas être réalisée : '+e.message)});let T=[],S=[];
 async function load(){[T,S]=await Promise.all([api('/api/templates'),api('/api/sessions')]);shell('home','','Diagnostic EPC / SENEVAL','Préparation, collecte et restitution d’ateliers',null);home()};const back='<button class="ghost" onclick="load()">← Retour à l’accueil</button>';
 window.currentSessionId=null;
 const DOMAIN_COLORS=['var(--domain-1)','var(--domain-2)','var(--domain-3)','var(--domain-4)','var(--domain-5)','var(--domain-6)','var(--domain-7)'];
@@ -20,7 +20,32 @@ function renderSidebar(active){
 }
 function renderTopbar(title,subtitle,cycleStage){
   let stages=[['config','CONFIGURATION'],['collecte','COLLECTE'],['analyse','ANALYSE'],['restitution','RESTITUTION']];
-  return `<div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-help" title="Aide" onclick="notice('Outil local de diagnostic organisationnel EPC / SENEVAL. Un doute sur un écran ? Le vocabulaire suit celui de l’atelier : domaines, indicateurs, priorités, recommandations.')">?</button>`;
+  return `<div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-help" title="Aide" onclick="helpPanel()">?</button>`;
+}
+function helpPanel(){
+  let n=document.querySelector('#notice');if(!n){n=document.createElement('div');n.id='notice';document.body.appendChild(n)}
+  n.className='help-modal';
+  n.innerHTML=`<div>
+    <h2>Aide — Outil de diagnostic EPC / SENEVAL</h2>
+    <p class="text-meta">Ce guide reste accessible à tout moment via le bouton « ? » en haut à droite.</p>
+    <h3>À quoi sert l’outil</h3>
+    <p>Il pilote un atelier de diagnostic organisationnel de bout en bout : préparation du questionnaire, collecte des réponses des participants, calcul des scores de capacité et de consensus par domaine, puis restitution (résultats, priorités, recommandations, rapport exportable).</p>
+    <h3>Mode d’emploi, étape par étape</h3>
+    <ol>
+      <li><b>Accueil → Nouveau diagnostic.</b> Donnez un nom à l’atelier ; vous êtes envoyé directement sur l’écran Configuration.</li>
+      <li><b>Configuration — informations de l’atelier.</b> Complétez lieu, date et description (optionnelle), puis « Enregistrer ».</li>
+      <li><b>Configuration — participants.</b> Indiquez le nombre de participants prévus (référence pour les analyses ; le nombre réel est recalculé à partir des réponses collectées).</li>
+      <li><b>Configuration — questionnaire.</b> Le modèle <b>EPC / SENEVAL</b> est utilisé par défaut pour tout nouvel atelier. Vous pouvez le garder tel quel, ou depuis ce même écran : « Changer de questionnaire » pour reprendre un autre modèle existant, ou « Nouveau questionnaire » pour en créer un vierge. « Voir / Modifier le questionnaire » permet d’ajouter, renommer ou supprimer des domaines et des indicateurs.</li>
+      <li><b>Configuration — échelle de notation.</b> Renommez les niveaux ou ajustez leur nombre (2 à 9) selon vos besoins. Une fois que l’atelier a des réponses, l’échelle et le questionnaire sont verrouillés pour ne pas invalider les données déjà collectées — changez-les avant d’ouvrir la collecte.</li>
+      <li><b>Ouvrir la collecte.</b> Depuis Configuration ou l’onglet Collecte : partagez le lien ou le QR code aux participants, qui répondent depuis leur téléphone ou en salle.</li>
+      <li><b>Résultats / Analyse.</b> Suivez la progression, consultez les scores par domaine et la grille graduée capacité/consensus.</li>
+      <li><b>Recommandations.</b> Sélectionnez des priorités et formulez les pistes d’action associées.</li>
+      <li><b>Rapport.</b> Exportez le diagnostic en Word, Excel, PDF (impression du rapport web) ou CSV.</li>
+    </ol>
+    <h3>Vocabulaire</h3>
+    <p><b>Domaine</b> : grande thématique de capacité organisationnelle (ex. Gestion des ressources humaines). <b>Indicateur</b> : question notée par les participants au sein d’un domaine. <b>Capacité</b> : moyenne des notes, ramenée sur 100. <b>Consensus</b> : degré d’accord entre participants (dispersion des notes). <b>Priorité</b> : indicateur retenu pour analyse approfondie et recommandations.</p>
+    <button class="secondary help-close" onclick="this.closest('.help-modal').remove()">Fermer</button>
+  </div>`;
 }
 function shell(active,cycleStage,title,subtitle,sessionSummary){
   document.querySelector('.app-shell')?.classList.remove('participant-mode');
