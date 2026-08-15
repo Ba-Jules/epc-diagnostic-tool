@@ -118,10 +118,12 @@ main{max-width:1180px;margin:0 auto;padding:1.6rem 1.4rem 3rem;width:100%}
 .domain-bar-row .db-count{flex:0 0 auto;width:1.6rem;text-align:right;color:var(--gray-500);font-weight:700;font-size:.78rem}
 
 /* ---------- Scale cards (échelle de notation) ---------- */
-.scale-cards{display:grid;grid-template-columns:repeat(5,1fr);gap:.7rem}
+.scale-cards{display:grid;grid-template-columns:repeat(var(--scale-cols,5),1fr);gap:.7rem}
 .scale-card{border-radius:14px;padding:.9rem .7rem;text-align:center;border:1.5px solid}
 .scale-card .sc-num{font-size:1.3rem;font-weight:800}
 .scale-card .sc-label{font-size:.76rem;font-weight:600;margin:.25rem 0 .5rem;min-height:2.2em}
+.scale-card .sc-label-input{width:100%;font-size:.76rem;font-weight:600;margin:.25rem 0 .5rem;min-height:2.2em;text-align:center;border:none;background:transparent;color:inherit;border-radius:6px;padding:.1rem .2rem}
+.scale-card .sc-label-input:hover,.scale-card .sc-label-input:focus{background:rgba(255,255,255,.6);outline:1.5px solid currentColor}
 .scale-card .sc-emoji{font-size:1.4rem}
 .scale-card.sc-1{background:var(--red-50);border-color:#f3c6c1;color:var(--red-600)}
 .scale-card.sc-2{background:var(--orange-50);border-color:#f0d4a8;color:var(--orange-600)}
@@ -148,7 +150,7 @@ main{max-width:1180px;margin:0 auto;padding:1.6rem 1.4rem 3rem;width:100%}
   .shell-main{margin-left:0}
   .sidebar{transform:translateX(-100%);transition:transform .18s;z-index:40}
   .sidebar.open{transform:translateX(0);box-shadow:0 0 0 100vmax rgba(0,0,0,.35)}
-  .scale-cards{grid-template-columns:repeat(2,1fr)}
+  .scale-cards{grid-template-columns:repeat(min(2,var(--scale-cols,5)),1fr)}
   .cycle-nav{display:none}
 }
 

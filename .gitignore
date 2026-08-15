@@ -29,3 +29,4 @@ Thumbs.db
 
 # Temporary code-generation artifacts
 gemini-code-*
+server.log

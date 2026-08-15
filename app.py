@@ -1025,7 +1025,14 @@ class Handler(SimpleHTTPRequestHandler):
         path, data, db = urlparse(self.path).path, self.body(), self.db()
         try:
             if path.startswith("/api/sessions/"):
-                sid=path.split("/")[3]; db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None,"") else None,sid)); db.commit(); return self.json(200,{"ok":True})
+                sid=path.split("/")[3]; expected=int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None,"") else None
+                if data.get("templateId"):
+                    tpl=db.execute("SELECT version FROM templates WHERE id=?",(data["templateId"],)).fetchone()
+                    if not tpl: return self.json(404,{"error":"Questionnaire introuvable"})
+                    db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,template_id=?,template_version=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,data["templateId"],tpl["version"],sid))
+                else:
+                    db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,sid))
+                db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/participants/"):
                 pid=path.split("/")[3]; db.execute("UPDATE participants SET display_name=? WHERE id=?",(data.get("displayName") or None,pid)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
