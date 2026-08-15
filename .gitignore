@@ -6,9 +6,16 @@ __pycache__/
 data/*.sqlite3
 data/*.sqlite3-*
 matrice-questionnaire-vierge.xlsx
+matrice-questionnaire-vierge_*.xlsx
+matrice-questionnaire_*.xlsx
 diagnostic*.xlsx
 diagnostic*.docx
 diagnostic*.pdf
+*_diagnostic_????-??-??.xlsx
+*_rapport_????-??-??.docx
+*_rapport_????-??-??.pdf
+*_reponses_????-??-??.csv
+*_????-??-??.csv
 
 # Temporary office files and operating-system/editor metadata
 ~$*

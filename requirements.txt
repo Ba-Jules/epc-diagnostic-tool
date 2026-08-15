@@ -1,0 +1,11 @@
+# Optionnel : le moteur (app.py) fonctionne avec la seule bibliothèque standard
+# Python + SQLite. Ces paquets ne sont nécessaires que pour les exports XLSX et
+# Word (voir README.md, section Prérequis). Sans eux, l'application démarre
+# normalement et ces boutons d'export sont simplement indisponibles. Le PDF
+# s'obtient via "Imprimer / Télécharger en PDF" (impression du navigateur),
+# sans dépendance supplémentaire.
+xlsxwriter
+python-docx
+# Pour les graphiques des rapports Word et Excel (images insérées) ; sans
+# Pillow, ces exports restent disponibles mais sans graphiques.
+Pillow

@@ -9,12 +9,20 @@ Application locale de préparation, collecte et restitution d’ateliers de diag
 - Calcul des scores de capacité, consensus et notes graduées.
 - Restitution graphique, sélection humaine des priorités et analyse qualitative.
 - Recommandations, thèmes de formation, plan d’action et rapport final.
-- Exports XLSX, Word et PDF ; le rapport écran peut être imprimé ou enregistré en PDF depuis le navigateur.
+- Exports XLSX et Word ; le rapport écran (« Imprimer / Télécharger en PDF ») s'imprime ou s'enregistre en PDF depuis le navigateur, avec la même mise en forme.
 
 ## Prérequis
 
 - Python 3.10 ou version plus récente.
-- Les bibliothèques `xlsxwriter`, `python-docx` et `reportlab` sont nécessaires pour les exports associés.
+- Le moteur lui-même (`app.py`) ne dépend que de la bibliothèque standard Python et de SQLite : il démarre sans rien installer de plus.
+- Les exports XLSX et Word nécessitent respectivement `xlsxwriter` et `python-docx`. Sans ces paquets, l'application fonctionne normalement ; seuls les boutons d'export correspondants sont indisponibles. Le PDF ne dépend d'aucun paquet : il passe par l'impression du navigateur.
+- `Pillow` est utilisé pour dessiner les graphiques insérés dans les exports Word et Excel. Sans lui, ces exports restent disponibles mais sans graphiques (texte et tableaux uniquement).
+
+Pour disposer de tous les exports, installer ces deux paquets optionnels :
+
+```powershell
+python -m pip install -r requirements.txt
+```
 
 ## Lancement
 
