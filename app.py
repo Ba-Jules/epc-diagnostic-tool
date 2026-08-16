@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import csv
 import base64
+import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import sys
@@ -19,8 +22,9 @@ import time
 import unicodedata
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from io import BytesIO
@@ -50,7 +54,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
-DATABASE = ROOT / "data" / "workshops.sqlite3"
+DATABASE = Path(os.environ["DATA_DIR"]) / "workshops.sqlite3" if os.environ.get("DATA_DIR") else ROOT / "data" / "workshops.sqlite3"
 IMPORTS = {}
 MATRIX_COLUMNS = ["Domaine", "Ordre domaine", "Code indicateur", "Indicateur", "Description", "Ordre indicateur", "Type réponse", "Obligatoire", "Actif"]
 PARAMETERS = ["Nom questionnaire", "Description", "Version", "Type d'échelle", "Valeur minimum", "Valeur maximum", "Libellés des valeurs", "Nombre de priorités par domaine"]
@@ -96,6 +100,8 @@ EPC_DOMAINS = [
     ]),
 ]
 
+GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#ea580c", "#4338ca"]
+
 GRADING = [(0, 22, 5), (23, 32, 10), (33, 39, 15), (40, 45, 20), (46, 50, 25), (51, 55, 30), (56, 59, 35), (60, 63, 40), (64, 67, 45), (68, 71, 50), (72, 74, 55), (75, 78, 60), (79, 81, 65), (82, 84, 70), (85, 87, 75), (88, 89, 80), (90, 92, 85), (93, 95, 90), (96, 98, 95), (99, 100, 100)]
 
 # ==================================================
@@ -135,6 +141,27 @@ AI_PROVIDERS = {
 
 class AIError(Exception):
     """Raised with a message safe to show the moderator (never a raw stack trace)."""
+
+
+class AuthRequiredError(Exception):
+    """Raised when an /api/ route needs a logged-in user and none is present."""
+
+
+class PermissionDeniedError(Exception):
+    """Raised when a logged-in user tries to reach a session/template/campaign they don't own."""
+
+
+PUBLIC_API_EXACT = {"/api/auth/setup-status", "/api/auth/setup", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/participant"}
+
+
+def is_public_api(path: str, method: str) -> bool:
+    if path in PUBLIC_API_EXACT:
+        return True
+    if path.startswith("/api/relay/") and method == "GET" and path.count("/") == 3:
+        return True
+    if path.startswith("/api/sessions/") and method == "POST" and (path.endswith("/participants") or path.endswith("/responses") or path.endswith("/complete")):
+        return True
+    return False
 
 
 def _http_json(url, headers, payload, timeout=25):
@@ -225,6 +252,10 @@ def _n(v):
     return "—" if v is None else round(v, 1)
 
 
+def _c(obj):
+    return "non calculable (1 seul répondant)" if obj.get("consensusNote") == "single_respondent" else _n(obj.get("consensus"))
+
+
 AI_SYSTEM_BASE = ("Tu assistes un modérateur d'atelier de diagnostic organisationnel EPC/SENEVAL. "
     "Tu interprètes des données déjà calculées ; tu ne recalcules jamais un score, tu n'inventes jamais un fait, "
     "une cause, une conséquence ou une recommandation absente des données fournies. "
@@ -235,15 +266,15 @@ def ai_epc_context(db, sid):
     a = analysis(db, sid)
     g = a["global"]
     lines = [f"Atelier : {a['session']['name']}", f"Participants : {a['participantCount']} · questionnaires validés : {a['completedCount']}",
-        f"Capacité globale : {_n(g['capacity'])}/100 · Consensus global : {_n(g['consensus'])}/100 "
+        f"Capacité globale : {_n(g['capacity'])}/100 · Consensus global : {_c(g)}/100 "
         f"(graduées : capacité {g['gradedCapacity']}, consensus {g['gradedConsensus']})", "", "Résultats par domaine :"]
     for d in a["domains"]:
         if d["capacity"] is None: continue
-        lines.append(f"- {d['label']} : capacité {_n(d['capacity'])}, consensus {_n(d['consensus'])} "
+        lines.append(f"- {d['label']} : capacité {_n(d['capacity'])}, consensus {_c(d)} "
             f"(graduées {d['gradedCapacity']}/{d['gradedConsensus']}), {d['responses']} répondant(s)")
         for i in d["indicators"]:
             if i["capacity"] is None: continue
-            lines.append(f"    · {i['label']} : capacité {_n(i['capacity'])}, consensus {_n(i['consensus'])}")
+            lines.append(f"    · {i['label']} : capacité {_n(i['capacity'])}, consensus {_c(i)}")
     return "\n".join(lines)
 
 
@@ -352,6 +383,9 @@ def init_db(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS ai_config (id INTEGER PRIMARY KEY CHECK (id=1), enabled INTEGER NOT NULL DEFAULT 0, provider TEXT, model TEXT, api_key TEXT, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_suggestions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), kind TEXT NOT NULL, target_id TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS report_ai_blocks (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), section_key TEXT NOT NULL, content TEXT NOT NULL, retained_at TEXT NOT NULL, UNIQUE(session_id, section_key));
+    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', display_name TEXT, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS auth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT, period_start TEXT, period_end TEXT, template_id TEXT NOT NULL REFERENCES templates(id), template_version INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     """)
     db.commit()
     existing_columns = {r["name"] for r in db.execute("PRAGMA table_info(participants)")}
@@ -359,13 +393,17 @@ def init_db(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE participants ADD COLUMN display_name TEXT")
         db.commit()
     session_columns = {r["name"] for r in db.execute("PRAGMA table_info(sessions)")}
-    for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER")):
+    for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER"), ("owner_user_id", "TEXT"), ("campaign_id", "TEXT"), ("group_code", "TEXT"), ("group_color", "TEXT"), ("relay_name", "TEXT"), ("relay_token_hash", "TEXT")):
         if col not in session_columns:
             db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+    template_columns = {r["name"] for r in db.execute("PRAGMA table_info(templates)")}
+    if "owner_user_id" not in template_columns:
+        db.execute("ALTER TABLE templates ADD COLUMN owner_user_id TEXT")
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
     migrate_reference_questionnaire(db)
+    migrate_v2_ownership(db)
 
 
 def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
@@ -436,12 +474,77 @@ def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
         db.execute("PRAGMA foreign_keys = ON")
 
 
+def migrate_v2_ownership(db: sqlite3.Connection) -> None:
+    """Assign every ownerless session/template to the first account created.
+
+    Runs on every startup (idempotent: a no-op once nothing is ownerless, or
+    while no account exists yet). This is what lets the pilot who completes
+    the first-run setup immediately keep the workshops/questionnaires that
+    already existed before authentication was introduced.
+    """
+    user = db.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
+    if not user:
+        return
+    if db.execute("SELECT 1 FROM sessions WHERE owner_user_id IS NULL LIMIT 1").fetchone() is None \
+            and db.execute("SELECT 1 FROM templates WHERE owner_user_id IS NULL AND name != 'EPC / SENEVAL' LIMIT 1").fetchone() is None:
+        return
+    if DATABASE.exists():
+        backup = DATABASE.with_name(f"{DATABASE.stem}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}{DATABASE.suffix}")
+        try:
+            shutil.copy2(DATABASE, backup)
+        except OSError:
+            pass
+    db.execute("UPDATE sessions SET owner_user_id=? WHERE owner_user_id IS NULL", (user["id"],))
+    # The reference EPC/SENEVAL template stays a common model (owner NULL); only
+    # personal/custom questionnaires get attached to the first account.
+    db.execute("UPDATE templates SET owner_user_id=? WHERE owner_user_id IS NULL AND name != 'EPC / SENEVAL'", (user["id"],))
+    db.commit()
+
+
+PBKDF2_ITERATIONS = 200_000
+AUTH_TOKEN_TTL_DAYS = 14
+
+
+def hash_password(password: str) -> tuple[str, str]:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), PBKDF2_ITERATIONS).hex()
+    return digest, salt
+
+
+def verify_password(password: str, password_hash: str, password_salt: str) -> bool:
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(password_salt), PBKDF2_ITERATIONS).hex()
+    return hmac.compare_digest(digest, password_hash)
+
+
+def create_auth_token(db: sqlite3.Connection, user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires = (datetime.now(timezone.utc) + timedelta(days=AUTH_TOKEN_TTL_DAYS)).isoformat()
+    db.execute("INSERT INTO auth_tokens VALUES (?,?,?,?)", (token_hash, user_id, now(), expires))
+    db.commit()
+    return token
+
+
+def relay_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def session_cookie_header(token: str | None = None, clear: bool = False) -> str:
+    # No `Secure` flag: the VPS currently serves this app over plain HTTP (no TLS
+    # termination in front of it), and a Secure cookie would simply never be sent
+    # back by the browser, breaking login entirely. SameSite=Lax is the practical
+    # CSRF mitigation available without adding a token scheme.
+    if clear:
+        return "epc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+    return f"epc_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={AUTH_TOKEN_TTL_DAYS*86400}"
+
+
 def seed_epc(db: sqlite3.Connection) -> str:
     tid, stamp = str(uuid.uuid4()), now()
     scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None))
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
         did = str(uuid.uuid4())
         db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
@@ -458,6 +561,48 @@ def rows(db: sqlite3.Connection, sql: str, args=()):
 def session_label(db: sqlite3.Connection, sid: str) -> str:
     row = db.execute("SELECT name FROM sessions WHERE id=?", (sid,)).fetchone()
     return row["name"] if row else "atelier"
+
+
+def campaign_kits_zip(db: sqlite3.Connection, campaign_id: str, base_url: str) -> bytes:
+    """One simple standalone HTML per group: campaign/group/relay + the two
+    links. The QR itself is not duplicated here — opening the relay link shows
+    it live (same tested qrSvg()/generateQR() already used everywhere else).
+
+    Relay tokens are only ever stored hashed (never retrievable), so building
+    fresh relay links here means regenerating every group's token — this is
+    the same "regenerate" capability exposed individually, just applied to
+    the whole campaign at once. Any previously shared relay links stop working.
+    """
+    camp = db.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+    if not camp:
+        raise ValueError("Campagne introuvable")
+    groups = rows(db, "SELECT * FROM sessions WHERE campaign_id=? ORDER BY created_at", (campaign_id,))
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for g in groups:
+            raw_token = secrets.token_urlsafe(24)
+            db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(raw_token), g["id"]))
+            participant_link = f"{base_url}/?session={g['id']}"
+            relay_link = f"{base_url}/?relay={raw_token}"
+            html = f"""<!doctype html><html lang="fr"><meta charset="utf-8"><title>Kit relais — {esc_html(g['name'])}</title>
+<body style="font-family:sans-serif;max-width:640px;margin:2rem auto;line-height:1.5">
+<h1>{esc_html(camp['name'])}</h1>
+<h2>Groupe : {esc_html(g['name'])} {f"({esc_html(g['group_code'])})" if g['group_code'] else ''}</h2>
+<p><b>Relais :</b> {esc_html(g['relay_name'] or 'Non renseigné')}</p>
+<p><b>Participants prévus :</b> {g['expected_participants'] or 'Non défini'}</p>
+<hr>
+<p><b>Lien participant</b> (à transmettre / afficher en QR) :<br><a href="{participant_link}">{participant_link}</a></p>
+<p><b>Lien de suivi relais</b> (votre tableau de bord + votre QR code) :<br><a href="{relay_link}">{relay_link}</a></p>
+<hr>
+<p>Consigne : partagez le lien participant (ou son QR, visible sur votre lien de suivi) aux personnes de votre groupe. Suivez l'avancée de la collecte depuis votre lien de suivi — aucune configuration ni accès aux autres groupes n'y est nécessaire.</p>
+</body></html>"""
+            zf.writestr(f"kit_{slugify(g['group_code'] or g['name'])}.html", html)
+    db.commit()
+    return buf.getvalue()
+
+
+def esc_html(s) -> str:
+    return (str(s or "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def template_payload(db, template_id: str):
@@ -485,7 +630,7 @@ def clone_template(db, template_id, name=None):
     if not old: raise ValueError("Configuration introuvable")
     tid, stamp = str(uuid.uuid4()), now()
     version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?", (name or old["name"],)).fetchone()[0]
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
     for d in old["domains"]:
         did=str(uuid.uuid4()); db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,d["code"],d["label"],d["description"],d["display_order"],d["active"]))
         for i in d["indicators"]:
@@ -493,12 +638,12 @@ def clone_template(db, template_id, name=None):
     db.commit(); return tid
 
 
-def create_blank_template(db, data):
+def create_blank_template(db, data, owner_user_id=None):
     tid, stamp = str(uuid.uuid4()), now(); name=data.get("name", "Nouveau questionnaire").strip()
     if not name: raise ValueError("Le nom est obligatoire")
     version=db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?",(name,)).fetchone()[0]
     scale={"type":"numeric","min":1,"max":5,"labels":{}}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp)); db.commit(); return tid
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id)); db.commit(); return tid
 
 
 def matrix_xlsx(template):
@@ -520,12 +665,12 @@ def blank_matrix_xlsx():
     return matrix_xlsx({"name":"Exemple à remplacer : Diagnostic EPC / [nom de l’atelier]", "description":"", "version":1, "scale":{"type":"numeric","min":1,"max":5,"labels":{}}, "priority":{"maxPerDomain":3}, "domains":[]})
 
 def report_rows(db, sid):
-    a=analysis(db,sid); return a, [[d['label'],d['capacity'],d['consensus'],d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
+    a=analysis(db,sid); return a, [[d['label'],d['capacity'],_c(d),d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
 
 def report_xlsx(db,sid):
     a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})
     analyses={x['priority_id']:x for x in q['analyses']}; priority_rows=[[p['id'],p['domain_label'],p['indicator_code'],p['indicator_label'],analyses.get(p['id'],{}).get('problem','')] for p in q['priorities']]
-    sheets=[("Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],a['global']['consensus']]]),("Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],i['consensus'],i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
+    sheets=[("Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
     for name,head,data in sheets:
         s=wb.add_worksheet(name);s.write_row(0,0,head,h);[s.write_row(n+1,0,row) for n,row in enumerate(data)];s.set_column(0,len(head)-1,24)
     ai_blocks=rows(db,"SELECT section_key,content FROM report_ai_blocks WHERE session_id=?",(sid,))
@@ -553,7 +698,7 @@ def report_xlsx(db,sid):
             for d in group:
                 inds=[ind for ind in d["indicators"] if ind.get("capacity") is not None]
                 if inds:
-                    caption=f"Capacité {pdf_fmt(d['capacity'])} · Consensus {pdf_fmt(d['consensus'])} · {d['responses']} répondant(s)"
+                    caption=f"Capacité {pdf_fmt(d['capacity'])} · Consensus {pdf_c(d)} · {d['responses']} répondant(s)"
                     tiles.append((docx_bars_chart(inds,"standard",d["label"]),caption))
             if tiles:
                 row+=1; gs.write(row,0,"Détail par domaine",h); row+=1
@@ -987,7 +1132,7 @@ def report_docx(db, sid):
     doc.add_paragraph()
     docx_metrics_row(doc, [
         ("Capacité", pdf_fmt(g["capacity"])),
-        ("Consensus", pdf_fmt(g["consensus"])),
+        ("Consensus", pdf_c(g)),
         ("Capacité graduée", pdf_fmt(g["gradedCapacity"])),
         ("Consensus gradué", pdf_fmt(g["gradedConsensus"])),
     ])
@@ -1000,7 +1145,7 @@ def report_docx(db, sid):
         for d in domains:
             row = t.add_row().cells
             graded = f"{d['gradedCapacity'] if d['gradedCapacity'] is not None else '—'} / {d['gradedConsensus'] if d['gradedConsensus'] is not None else '—'}"
-            for c, v in zip(row, [d["label"], pdf_fmt(d["capacity"]), pdf_fmt(d["consensus"]), graded, pdf_level(d["capacity"]), d["responses"]]):
+            for c, v in zip(row, [d["label"], pdf_fmt(d["capacity"]), pdf_c(d), graded, pdf_level(d["capacity"]), d["responses"]]):
                 c.text = str(v)
         docx_style_table(t)
         if not domains:
@@ -1032,7 +1177,7 @@ def report_docx(db, sid):
     for d in domains:
         row = t.add_row().cells
         graded = f"{d['gradedCapacity'] if d['gradedCapacity'] is not None else '—'} / {d['gradedConsensus'] if d['gradedConsensus'] is not None else '—'}"
-        for c, v in zip(row, [d["label"], pdf_fmt(d["capacity"]), pdf_fmt(d["consensus"]), graded, pdf_level(d["capacity"]), d["responses"]]):
+        for c, v in zip(row, [d["label"], pdf_fmt(d["capacity"]), pdf_c(d), graded, pdf_level(d["capacity"]), d["responses"]]):
             c.text = str(v)
     docx_style_table(t)
 
@@ -1058,6 +1203,10 @@ PDF_STOPWORDS = {"de", "des", "du", "la", "le", "les", "et", "en", "au", "aux", 
 
 def pdf_fmt(v):
     return "—" if v is None else f"{v:.1f}"
+
+
+def pdf_c(obj):
+    return "Non calculable" if obj.get("consensusNote") == "single_respondent" else pdf_fmt(obj.get("consensus"))
 
 
 def pdf_short_label(item):
@@ -1143,9 +1292,9 @@ def import_preview(raw):
     return {"errors":errors,"template":{"name":params.get("Nom questionnaire",""),"description":params.get("Description",""),"scale":{"type":params.get("Type d'échelle","numeric"),"min":lo if not errors else 1,"max":hi if not errors else 5,"labels":json.loads(params.get("Libellés des valeurs") or "{}")},"priority":{"maxPerDomain":int(float(params.get("Nombre de priorités par domaine",3) or 3))},"domains":[{"label":k[0],"display_order":k[1],"indicators":sorted(v,key=lambda x:x["display_order"])} for k,v in sorted(domains.items(),key=lambda x:x[0][1])]},"rows":sum(len(x) for x in domains.values())}
 
 
-def save_import(db, data):
+def save_import(db, data, owner_user_id=None):
     if data["errors"]: raise ValueError("La matrice comporte des erreurs")
-    tid=create_blank_template(db,data["template"]); t=data["template"]; db.execute("UPDATE templates SET scale_json=?,priority_json=? WHERE id=?",(json.dumps(t["scale"]),json.dumps(t["priority"]),tid))
+    tid=create_blank_template(db,data["template"],owner_user_id); t=data["template"]; db.execute("UPDATE templates SET scale_json=?,priority_json=? WHERE id=?",(json.dumps(t["scale"]),json.dumps(t["priority"]),tid))
     for d in t["domains"]:
         did=str(uuid.uuid4()); code="domain-"+uuid.uuid4().hex[:8]; db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,code,d["label"],"",d["display_order"],1))
         for i in d["indicators"]: db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),did,i["code"],i["label"],i["description"],i["response_type"],int(i["required"]),i["display_order"],int(i["active"]),"{}"))
@@ -1170,36 +1319,59 @@ def grade(value, norm):
 
 
 def analysis(db, session_id: str):
+    """Single-session analysis. Thin wrapper over analysis_for so a lone
+    workshop and a multi-group consolidation share one calculation path."""
     session = db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     if not session:
         return None
-    template = template_payload(db, session["template_id"])
+    result = analysis_for(db, [session_id])
+    if result is None:
+        return None
+    result["session"] = dict(session)
+    return result
+
+
+def analysis_for(db, session_ids: list[str]):
+    """Same EPC calculation as analysis(), pooling responses/participants over
+    one or several session ids. A single id behaves exactly as before; several
+    ids (same template) is what powers campaign consolidation — the maths are
+    never a mean-of-means, they recompute directly from individual responses.
+    """
+    if not session_ids:
+        return None
+    first = db.execute("SELECT * FROM sessions WHERE id=?", (session_ids[0],)).fetchone()
+    if not first:
+        return None
+    template = template_payload(db, first["template_id"])
     scale, rules, consensus, norm = template["scale"], template["scoring"], template["consensus"], template["grading"]
     low, high, amplitude = float(scale["min"]), float(scale["max"]), float(scale["max"] - scale["min"])
     output_max = float(rules.get("outputRange", [0, 100])[1])
-    all_values, output_domains = [], []
+    ph = ",".join("?" * len(session_ids))
+    all_values, output_domains, all_participant_ids = [], [], set()
+    total_participants = len(rows(db, f"SELECT id FROM participants WHERE session_id IN ({ph})", session_ids))
     for domain in template["domains"]:
         indicators = [i for i in domain["indicators"] if i["active"]]
         output_indicators, participant_means = [], {}
         for indicator in indicators:
-            response_rows = rows(db, "SELECT participant_id,value_json FROM responses WHERE session_id=? AND indicator_id=?", (session_id, indicator["id"]))
+            response_rows = rows(db, f"SELECT participant_id,value_json FROM responses WHERE session_id IN ({ph}) AND indicator_id=?", (*session_ids, indicator["id"]))
             values = [float(json.loads(r["value_json"])) for r in response_rows if isinstance(json.loads(r["value_json"]), (int, float))]
             for r in response_rows:
                 value = json.loads(r["value_json"])
                 if isinstance(value, (int, float)):
                     participant_means.setdefault(r["participant_id"], []).append(float(value))
+                    all_participant_ids.add(r["participant_id"])
             mean = sum(values) / len(values) if values else None
-            sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** .5 if len(values) > 1 else 0 if values else None
+            sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** .5 if len(values) > 1 else None
             capacity = mean / high * output_max if mean is not None else None
             cons = max(0, output_max - consensus["factor"] * (sd / amplitude * output_max)) if sd is not None else None
-            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, len(rows(db, "SELECT id FROM participants WHERE session_id=?", (session_id,))) - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
+            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, total_participants - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
             all_values.extend(values)
         person_scores = [sum(values) / len(values) for values in participant_means.values() if values]
         dmean = sum(person_scores) / len(person_scores) if person_scores else None
-        dsd = (sum((v - dmean) ** 2 for v in person_scores) / (len(person_scores) - 1)) ** .5 if len(person_scores) > 1 else 0 if person_scores else None
+        dsd = (sum((v - dmean) ** 2 for v in person_scores) / (len(person_scores) - 1)) ** .5 if len(person_scores) > 1 else None
         dcap = dmean / high * output_max if dmean is not None else None
         dcons = max(0, output_max - consensus["factor"] * (dsd / amplitude * output_max)) if dsd is not None else None
-        output_domains.append({"id": domain["id"], "code": domain["code"], "label": domain["label"], "responses": len(person_scores), "capacity": dcap, "dispersion": dsd, "consensus": dcons, "gradedCapacity": grade(dcap, norm) if dcap is not None else None, "gradedConsensus": grade(dcons, norm) if dcons is not None else None, "indicators": output_indicators})
+        output_domains.append({"id": domain["id"], "code": domain["code"], "label": domain["label"], "responses": len(person_scores), "capacity": dcap, "dispersion": dsd, "consensus": dcons, "consensusNote": "single_respondent" if len(person_scores) == 1 else None, "gradedCapacity": grade(dcap, norm) if dcap is not None else None, "gradedConsensus": grade(dcons, norm) if dcons is not None else None, "indicators": output_indicators})
     # Mirrors the reference KOICA tool's "Moyenne" row: global capacity/consensus
     # (standardized and graduated alike) are unweighted averages across domains,
     # not a response-weighted pool of every individual answer. The graduated
@@ -1211,8 +1383,8 @@ def analysis(db, session_id: str):
     graded_caps=[d["gradedCapacity"] for d in output_domains if d["gradedCapacity"] is not None]; graded_cons=[d["gradedConsensus"] for d in output_domains if d["gradedConsensus"] is not None]
     global_graded_capacity=sum(graded_caps)/len(graded_caps) if graded_caps else None
     global_graded_consensus=sum(graded_cons)/len(graded_cons) if graded_cons else None
-    participants=len(rows(db,"SELECT id FROM participants WHERE session_id=?",(session_id,))); completed=len(rows(db,"SELECT id FROM participants WHERE session_id=? AND status='completed'",(session_id,)))
-    return {"session": dict(session), "participantCount": participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
+    completed=len(rows(db,f"SELECT id FROM participants WHERE session_id IN ({ph}) AND status='completed'",session_ids))
+    return {"sessionIds": session_ids, "participantCount": total_participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "consensusNote": "single_respondent" if len(all_participant_ids) == 1 else None, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
 
 
 def qualitative_data(db, session_id: str):
@@ -1240,26 +1412,102 @@ class Handler(SimpleHTTPRequestHandler):
     def db(self):
         db = connect(); init_db(db); return db
 
-    def json(self, code, payload):
+    def json(self, code, payload, cookie=None):
         raw = json.dumps(payload, ensure_ascii=False).encode()
-        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(raw)))
+        if cookie is not None: self.send_header("Set-Cookie", cookie)
+        self.end_headers(); self.wfile.write(raw)
 
     def body(self):
         size = int(self.headers.get("Content-Length", 0)); return json.loads(self.rfile.read(size) or b"{}")
 
     def raw_body(self): return self.rfile.read(int(self.headers.get("Content-Length", 0)))
 
+    def current_user(self, db):
+        raw = self.headers.get("Cookie")
+        if not raw: return None
+        jar = SimpleCookie(); jar.load(raw)
+        morsel = jar.get("epc_session")
+        if not morsel: return None
+        token_hash = hashlib.sha256(morsel.value.encode("utf-8")).hexdigest()
+        row = db.execute("SELECT u.* FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.expires_at>?", (token_hash, now())).fetchone()
+        return dict(row) if row else None
+
+    def check_ownership(self, path, db, user):
+        parts = path.split("/")
+        if path.startswith("/api/sessions/") and len(parts) > 3 and parts[3]:
+            row = db.execute("SELECT owner_user_id FROM sessions WHERE id=?", (parts[3],)).fetchone()
+            if row and user["role"] != "admin" and row["owner_user_id"] not in (None, user["id"]):
+                raise PermissionDeniedError()
+        elif path.startswith("/api/templates/") and len(parts) > 3 and parts[3] not in ("matrix.xlsx", "import"):
+            row = db.execute("SELECT owner_user_id FROM templates WHERE id=?", (parts[3],)).fetchone()
+            if row and row["owner_user_id"] is not None and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
+                raise PermissionDeniedError()
+        elif path.startswith("/api/campaigns/") and len(parts) > 3 and parts[3]:
+            row = db.execute("SELECT owner_user_id FROM campaigns WHERE id=?", (parts[3],)).fetchone()
+            if row and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
+                raise PermissionDeniedError()
+
+    def require_auth(self, path, db):
+        """Call first inside each verb handler's try block. Returns the current
+        user (or None for the small public whitelist) and enforces per-row
+        ownership for /api/sessions|templates|campaigns/<id>... routes."""
+        user = self.current_user(db)
+        if path.startswith("/api/") and not is_public_api(path, self.command):
+            if user is None: raise AuthRequiredError()
+            self.check_ownership(path, db, user)
+        return user
+
     def do_GET(self):
         path, query = urlparse(self.path).path, parse_qs(urlparse(self.path).query)
         db = self.db()
         try:
-            if path == "/api/templates": return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' ORDER BY name,version DESC"))
+            user = self.require_auth(path, db)
+            if path == "/api/auth/setup-status":
+                return self.json(200, {"needsSetup": db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is None})
+            if path == "/api/auth/me":
+                return self.json(200, {"user": {"id": user["id"], "email": user["email"], "role": user["role"], "displayName": user["display_name"]} if user else None})
+            if path.startswith("/api/relay/"):
+                token = path.split("/", 3)[3]
+                g = db.execute("SELECT s.*, c.name AS campaign_name FROM sessions s LEFT JOIN campaigns c ON c.id=s.campaign_id WHERE s.relay_token_hash=?", (relay_token_hash(token),)).fetchone()
+                if not g: return self.json(404, {"error": "Lien relais introuvable ou révoqué."})
+                pc = db.execute("SELECT COUNT(*) FROM participants WHERE session_id=?", (g["id"],)).fetchone()[0]
+                cc = db.execute("SELECT COUNT(*) FROM participants WHERE session_id=? AND status='completed'", (g["id"],)).fetchone()[0]
+                link = f"{self.headers.get('X-Forwarded-Proto','http')}://{self.headers.get('Host','')}/?session={g['id']}"
+                return self.json(200, {"campaignName": g["campaign_name"], "groupName": g["name"], "relayName": g["relay_name"], "groupCode": g["group_code"], "groupColor": g["group_color"], "expectedParticipants": g["expected_participants"], "participantCount": pc, "completedCount": cc, "participantLink": link})
+            if path == "/api/campaigns":
+                if user["role"] == "admin": return self.json(200, rows(db, "SELECT * FROM campaigns ORDER BY created_at DESC"))
+                return self.json(200, rows(db, "SELECT * FROM campaigns WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
+            if path.startswith("/api/campaigns/") and path.endswith("/groups"):
+                cid = path.split("/")[3]
+                return self.json(200, rows(db, """SELECT s.id,s.name,s.organization,s.location,s.date,s.status,s.created_at,s.expected_participants,s.campaign_id,s.group_code,s.group_color,s.relay_name,s.owner_user_id,
+                    (SELECT COUNT(*) FROM participants p WHERE p.session_id=s.id) AS participant_count,
+                    (SELECT COUNT(*) FROM participants p WHERE p.session_id=s.id AND p.status='completed') AS completed_count
+                    FROM sessions s WHERE s.campaign_id=? ORDER BY s.created_at""", (cid,)))
+            if path.startswith("/api/campaigns/") and path.endswith("/kits.zip"):
+                cid = path.split("/")[3]
+                base_url = f"{self.headers.get('X-Forwarded-Proto','http')}://{self.headers.get('Host','')}"
+                try:
+                    data = campaign_kits_zip(db, cid, base_url)
+                except ValueError as e:
+                    return self.json(404, {"error": str(e)})
+                name = export_filename(db.execute("SELECT name FROM campaigns WHERE id=?", (cid,)).fetchone()["name"], "kits-relais", ext="zip")
+                self.send_response(200); self.send_header("Content-Type", "application/zip"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+            if path.startswith("/api/campaigns/"):
+                cid = path.rsplit("/", 1)[1]
+                camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
+                return self.json(200, dict(camp) if camp else {"error": "Campagne introuvable"})
+            if path == "/api/templates":
+                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' ORDER BY name,version DESC"))
+                return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY name,version DESC", (user["id"],)))
             if path == "/api/templates/matrix.xlsx":
                 data=blank_matrix_xlsx(); name=export_filename("matrice-questionnaire-vierge", ext="xlsx"); self.send_response(200); self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); self.send_header("Content-Disposition",f"attachment; filename={name}"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/templates/") and path.endswith("/matrix.xlsx"):
                 template=template_payload(db,path.split("/")[3]); data=matrix_xlsx(template); name=export_filename(template["name"],"matrice-questionnaire", ext="xlsx"); self.send_response(200); self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); self.send_header("Content-Disposition",f"attachment; filename={name}"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/templates/"): return self.json(200, template_payload(db, path.rsplit("/", 1)[1]) or {"error": "Configuration introuvable"})
-            if path == "/api/sessions": return self.json(200, rows(db, "SELECT * FROM sessions ORDER BY created_at DESC"))
+            if path == "/api/sessions":
+                if user["role"] == "admin": return self.json(200, rows(db, "SELECT * FROM sessions ORDER BY created_at DESC"))
+                return self.json(200, rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
                 result = analysis(db, path.split("/")[3]); return self.json(200, result or {"error": "Session introuvable"})
             if path.startswith("/api/sessions/") and path.endswith("/workshop-data"):
@@ -1294,17 +1542,107 @@ class Handler(SimpleHTTPRequestHandler):
                 session = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
                 return self.json(200, {"session": dict(session) if session else None, "participant": dict(participant) if participant else None, "template": template_payload(db, session["template_id"]) if session else None, "responses": {r["indicator_id"]: json.loads(r["value_json"]) for r in db.execute("SELECT * FROM responses WHERE participant_id=?", (pid,))}})
             return self.serve_static(path)
+        except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
+        except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
         finally: db.close()
 
     def do_POST(self):
         path = urlparse(self.path).path
         if path == "/api/templates/import/preview":
+            guard_db = self.db()
+            try:
+                self.require_auth(path, guard_db)
+            except AuthRequiredError:
+                return self.json(401, {"error": "Connexion requise."})
+            finally:
+                guard_db.close()
             raw=self.raw_body(); marker=b"\r\n\r\n"; start=raw.find(marker)+len(marker); end=raw.rfind(b"\r\n--"); uploaded=raw[start:end]
             try:
                 preview=import_preview(uploaded); token=str(uuid.uuid4()); IMPORTS[token]=preview; return self.json(200,{"token":token,**preview})
             except ValueError as e: return self.json(400,{"error":str(e)})
         data, db = self.body(), self.db()
         try:
+            user = self.require_auth(path, db)
+            if path == "/api/auth/setup":
+                if db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
+                    return self.json(409, {"error": "Un compte existe déjà : utilisez la connexion."})
+                email = (data.get("email") or "").strip().lower()
+                password = data.get("password") or ""
+                if not email or "@" not in email: return self.json(400, {"error": "Adresse email invalide."})
+                if len(password) < 8: return self.json(400, {"error": "Le mot de passe doit contenir au moins 8 caractères."})
+                uid = str(uuid.uuid4()); digest, salt = hash_password(password)
+                db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (uid, email, digest, salt, "admin", data.get("displayName") or "", now()))
+                db.commit()
+                migrate_v2_ownership(db)
+                token = create_auth_token(db, uid)
+                return self.json(201, {"user": {"id": uid, "email": email, "role": "admin"}}, cookie=session_cookie_header(token))
+            if path == "/api/auth/login":
+                email = (data.get("email") or "").strip().lower()
+                row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+                if not row or not verify_password(data.get("password") or "", row["password_hash"], row["password_salt"]):
+                    return self.json(401, {"error": "Identifiants incorrects."})
+                token = create_auth_token(db, row["id"])
+                return self.json(200, {"user": {"id": row["id"], "email": row["email"], "role": row["role"], "displayName": row["display_name"]}}, cookie=session_cookie_header(token))
+            if path == "/api/auth/logout":
+                raw = self.headers.get("Cookie")
+                if raw:
+                    jar = SimpleCookie(); jar.load(raw); morsel = jar.get("epc_session")
+                    if morsel: db.execute("DELETE FROM auth_tokens WHERE token_hash=?", (hashlib.sha256(morsel.value.encode("utf-8")).hexdigest(),)); db.commit()
+                return self.json(200, {"ok": True}, cookie=session_cookie_header(clear=True))
+            if path == "/api/campaigns":
+                if not (data.get("name") or "").strip(): return self.json(400, {"error": "Le nom de la campagne est obligatoire."})
+                if not data.get("templateId"): return self.json(400, {"error": "Le questionnaire est obligatoire."})
+                tpl = db.execute("SELECT version FROM templates WHERE id=?", (data["templateId"],)).fetchone()
+                if not tpl: return self.json(404, {"error": "Questionnaire introuvable."})
+                cid = str(uuid.uuid4()); stamp = now()
+                db.execute("INSERT INTO campaigns VALUES (?,?,?,?,?,?,?,?,?,?,?)", (cid, user["id"], data["name"], data.get("description", ""), data.get("periodStart"), data.get("periodEnd"), data["templateId"], tpl["version"], "active", stamp, stamp))
+                db.commit(); return self.json(201, {"id": cid})
+            if path.startswith("/api/campaigns/") and path.endswith("/groups"):
+                cid = path.split("/")[3]
+                camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
+                if not camp: return self.json(404, {"error": "Campagne introuvable."})
+                if not (data.get("name") or "").strip(): return self.json(400, {"error": "Le nom du groupe est obligatoire."})
+                existing_codes = {r["group_code"] for r in db.execute("SELECT group_code FROM sessions WHERE campaign_id=?", (cid,))}
+                base_code = slugify(data["name"])[:3].upper() or "GRP"
+                n = 1
+                while f"{base_code}-{n:02d}" in existing_codes: n += 1
+                group_code = f"{base_code}-{n:02d}"
+                group_color = GROUP_COLORS[len(existing_codes) % len(GROUP_COLORS)]
+                sid = str(uuid.uuid4())
+                raw_token = secrets.token_urlsafe(24)
+                db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, camp["template_id"], camp["template_version"], data["name"], "", "", "", "open", now(), None, "", int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"], cid, group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token)))
+                db.commit()
+                return self.json(201, {"id": sid, "groupCode": group_code, "groupColor": group_color, "relayToken": raw_token})
+            if path.startswith("/api/campaigns/") and path.endswith("/consolidate"):
+                cid = path.split("/")[3]
+                session_ids = data.get("sessionIds") or []
+                if len(session_ids) < 1: return self.json(400, {"error": "Sélectionnez au moins un groupe."})
+                placeholders = ",".join("?" * len(session_ids))
+                sel = rows(db, f"SELECT id,template_id,template_version,campaign_id FROM sessions WHERE id IN ({placeholders})", session_ids)
+                if len(sel) != len(session_ids) or any(s["campaign_id"] != cid for s in sel):
+                    return self.json(400, {"error": "Sélection de groupes invalide."})
+                templates_used = {(s["template_id"], s["template_version"]) for s in sel}
+                if len(templates_used) > 1:
+                    return self.json(409, {"error": "Ces groupes utilisent des questionnaires différents et ne peuvent pas être consolidés directement."})
+                result = analysis_for(db, session_ids)
+                result["groups"] = rows(db, f"SELECT id,name,group_code,group_color FROM sessions WHERE id IN ({placeholders})", session_ids)
+                return self.json(200, result)
+            if path.startswith("/api/campaigns/") and "/groups/" in path and path.endswith("/regenerate-relay"):
+                parts = path.split("/"); sid = parts[5]
+                g = db.execute("SELECT id FROM sessions WHERE id=? AND campaign_id=?", (sid, parts[3])).fetchone()
+                if not g: return self.json(404, {"error": "Groupe introuvable."})
+                raw_token = secrets.token_urlsafe(24)
+                db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(raw_token), sid)); db.commit()
+                return self.json(200, {"relayToken": raw_token})
+            if path.startswith("/api/relay/") and path.endswith("/regenerate"):
+                token = path.split("/")[3]
+                g = db.execute("SELECT id, campaign_id FROM sessions WHERE relay_token_hash=?", (relay_token_hash(token),)).fetchone()
+                if not g: return self.json(404, {"error": "Lien relais introuvable."})
+                camp = db.execute("SELECT owner_user_id FROM campaigns WHERE id=?", (g["campaign_id"],)).fetchone()
+                if not camp or (user["role"] != "admin" and camp["owner_user_id"] != user["id"]): raise PermissionDeniedError()
+                new_token = secrets.token_urlsafe(24)
+                db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(new_token), g["id"])); db.commit()
+                return self.json(200, {"relayToken": new_token})
             if path == "/api/ai/test":
                 try:
                     cfg = require_ai(db)
@@ -1451,11 +1789,11 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.json(200, {"id": sug_id, "sections": results})
                 except AIError as e: return self.json(409, {"error": str(e)})
 
-            if path == "/api/templates": return self.json(201,{"id":create_blank_template(db,data)})
+            if path == "/api/templates": return self.json(201,{"id":create_blank_template(db,data,user["id"])})
             if path == "/api/templates/import/confirm":
                 preview=IMPORTS.pop(data.get("token"),None)
                 if not preview: return self.json(400,{"error":"Aperçu d'import introuvable ou expiré"})
-                return self.json(201,{"id":save_import(db,preview)})
+                return self.json(201,{"id":save_import(db,preview,user["id"])})
             if path.startswith("/api/templates/") and path.endswith("/clone"):
                 return self.json(201,{"id":clone_template(db,path.split("/")[3],data.get("name"))})
             if path.startswith("/api/templates/") and path.endswith("/domains"):
@@ -1465,7 +1803,7 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/sessions":
                 template = template_payload(db, data["templateId"])
                 if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]): return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
-                sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None)); db.commit(); return self.json(201, {"id": sid})
+                sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"], None, None, None, None, None)); db.commit(); return self.json(201, {"id": sid})
             if path.endswith("/participants"):
                 sid = path.split("/")[3]; session = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
                 if not session or session["status"] != "open": return self.json(409, {"error": "Collecte fermée"})
@@ -1499,12 +1837,22 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json(404, {"error": "Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
+        except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
+        except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
         except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
     def do_PUT(self):
         path, data, db = urlparse(self.path).path, self.body(), self.db()
         try:
+            user = self.require_auth(path, db)
+            if path.startswith("/api/campaigns/") and not path.endswith("/groups"):
+                cid = path.rsplit("/", 1)[1]
+                camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
+                if not camp: return self.json(404, {"error": "Campagne introuvable."})
+                db.execute("UPDATE campaigns SET name=?,description=?,period_start=?,period_end=?,status=?,updated_at=? WHERE id=?",
+                    (data.get("name", camp["name"]), data.get("description", camp["description"]), data.get("periodStart", camp["period_start"]), data.get("periodEnd", camp["period_end"]), data.get("status", camp["status"]), now(), cid))
+                db.commit(); return self.json(200, {"ok": True})
             if path == "/api/ai/config":
                 if data.get("provider") and data["provider"] not in AI_PROVIDERS: return self.json(400, {"error": "Fournisseur IA inconnu."})
                 cur = get_ai_config(db)
@@ -1556,12 +1904,34 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
+        except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
+        except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
         except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
     def do_DELETE(self):
         path, db=urlparse(self.path).path,self.db()
         try:
+            user = self.require_auth(path, db)
+            if path.startswith("/api/campaigns/") and "/groups/" in path:
+                cid, sid = path.split("/")[3], path.split("/")[5]
+                used = db.execute("SELECT COUNT(*) FROM responses WHERE session_id=?", (sid,)).fetchone()[0]
+                if used:
+                    return self.json(409, {"error": f"Suppression impossible : {used} réponse(s) déjà enregistrées pour ce groupe. Vous pouvez le clôturer plutôt que le supprimer.", "dependencies": used})
+                for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
+                    db.execute(f"DELETE FROM {table} WHERE session_id=?", (sid,))
+                db.execute("DELETE FROM sessions WHERE id=? AND campaign_id=?", (sid, cid)); db.commit(); return self.json(200, {"ok": True})
+            if path.startswith("/api/campaigns/"):
+                cid = path.rsplit("/", 1)[1]
+                used = db.execute("SELECT COUNT(*) FROM responses r JOIN sessions s ON s.id=r.session_id WHERE s.campaign_id=?", (cid,)).fetchone()[0]
+                if used:
+                    return self.json(409, {"error": f"Suppression impossible : cette campagne contient {used} réponse(s) enregistrées. Clôturez-la plutôt que de la supprimer.", "dependencies": used})
+                group_ids = [r["id"] for r in db.execute("SELECT id FROM sessions WHERE campaign_id=?", (cid,))]
+                for sid in group_ids:
+                    for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
+                        db.execute(f"DELETE FROM {table} WHERE session_id=?", (sid,))
+                    db.execute("DELETE FROM sessions WHERE id=?", (sid,))
+                db.execute("DELETE FROM campaigns WHERE id=?", (cid,)); db.commit(); return self.json(200, {"ok": True})
             if path.startswith("/api/sessions/") and "/ai/report-block/" in path:
                 sid=path.split("/")[3]; section=path.rsplit("/",1)[1]
                 db.execute("DELETE FROM report_ai_blocks WHERE session_id=? AND section_key=?",(sid,section)); db.commit(); return self.json(200,{"ok":True})
@@ -1606,6 +1976,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
+        except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
+        except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
         except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
