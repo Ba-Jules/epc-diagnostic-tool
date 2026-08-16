@@ -788,7 +788,8 @@ def docx_bars_chart(items, mode, title, with_mean=False):
     data = [d for d in items if d.get("capacity") is not None]
     if with_mean and data:
         mc = sum(d["capacity"] for d in data) / len(data)
-        ms = sum(d["consensus"] for d in data) / len(data)
+        cons_data = [d for d in data if d.get("consensus") is not None]
+        ms = sum(d["consensus"] for d in cons_data) / len(cons_data) if cons_data else None
         gc = sum(d.get("gradedCapacity") or 0 for d in data) / len(data)
         gs = sum(d.get("gradedConsensus") or 0 for d in data) / len(data)
         data = data + [{"label": "Moyen", "code": "Moyen", "capacity": mc, "consensus": ms, "gradedCapacity": gc, "gradedConsensus": gs}]
@@ -838,7 +839,7 @@ def docx_bars_chart(items, mode, title, with_mean=False):
 
 def docx_grid_chart(items):
     """Quadrant scatter with numbered markers, raster twin of graduatedGrid() / pdf_grid_chart()."""
-    data = [d for d in items if d.get("capacity") is not None]
+    data = [d for d in items if d.get("capacity") is not None and d.get("consensus") is not None]
     w, h = 700, 620
     img = PILImage.new("RGB", (w, h), "white")
     draw = ImageDraw.Draw(img)
@@ -933,7 +934,8 @@ def docx_cohort_chart(items):
         draw.text((30, 60), "Pas encore de données disponibles pour l’analyse de cohorte.", font=f_axis, fill="black")
         return img
     mc = sum(d["capacity"] for d in data) / len(data)
-    ms = sum(d["consensus"] for d in data) / len(data)
+    cons_data = [d for d in data if d.get("consensus") is not None]
+    ms = sum(d["consensus"] for d in cons_data) / len(cons_data) if cons_data else None
     # Mirrors static/app.js cohort(): missing graded values count as 0, divided by
     # the full domain count (not just the domains that have a graded value).
     gc = sum(d.get("gradedCapacity") or 0 for d in data) / len(data)
