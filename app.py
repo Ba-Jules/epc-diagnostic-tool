@@ -75,28 +75,96 @@ def export_filename(*parts, ext: str) -> str:
     return f"{slug}_{datetime.now().strftime('%Y-%m-%d')}.{ext}"
 
 
-# Questionnaire EPC/SENEVAL de référence : libellés et ordre repris exactement du
-# questionnaire de terrain SEN029 (fichiers historiques identiques pour Louga, Matam
-# ELUS, Matam SERVICES et Saint-Louis) — 6 domaines, 80 indicateurs. Aucun libellé
-# reformulé ni inventé.
+# Questionnaire EPC/SENEVAL de reference : source de verite absolue = le document
+# local "5 Diagnostic de SenEval selon EPC PAB (1).docx" (extrait mecaniquement via
+# python-docx, aucune reformulation). 7 domaines x 10 indicateurs = 70. Chaque
+# indicateur porte deux textes distincts du DOCX : sa Reference courte et son enonce
+# complet ("Indicateurs qualitatifs ou Capacites"), stockes respectivement dans les
+# colonnes indicators.code et indicators.label.
 EPC_DOMAINS = [
-    ("grh", "Gestion des Ressources Humaines", [
-        "Recrutement transparent", "Transdisciplinarité", "Egalité de genre", "Parité H/F", "Diversité du personnel", "Profil du personnel", "Compétences du personnel", "Effectif du personnel", "Formations régulières", "Formations adaptées", "Formation selon priorités", "Motivation", "Gestion des conflits", "Supervision", "Evaluation",
+    ('grh', 'Gestion des Ressources Humaines', [
+        ('Formation au personnel', 'Nous offrons régulièrement la formation au personnel'),
+        ('Priorités de notre Organisation', 'Notre formation du personnel contribue directement à l’exécution des priorités de notre Organisation'),
+        ('Compétences pour notre mission', 'Notre personnel a les compétences appropriées pour exécuter notre mission'),
+        ('Nombre du personnel', 'Le nombre de personnel est approprié pour exécuter notre mission'),
+        ('Diversité de nos bénéficiaires', 'Notre personnel reflète la diversité de nos bénéficiaires'),
+        ('Recrutement des membres', 'Le système de recrutement des membres favorise l’adhésion à l’organisation'),
+        ('Evaluation du Personnel', 'L’évaluation du Personnel encourage la fixation des membres'),
+        ('Résolution des conflits', 'La politique de résolution des griefs et des conflits contribue à la rétention du personnel :'),
+        ('Allocation des tâches', 'L’allocation des tâches et des responsabilités participent à la rétention du personnel :'),
+        ('Pratiques de supervision', 'Les pratiques de supervision améliorent la capacité de notre personnel à atteindre les objectifs de l’Organisation.'),
     ]),
-    ("grf", "Gestion des Ressources Financieres", [
-        "Procédures régulières", "Budgétisation selon priorités", "Prévisions financières", "Dépenses selon revenus", "Charges fixes", "Décaissements périodiques", "Appui de l’Etat", "Appui des Partenaires", "Ressources pour activités", "Ressources pour infrastructures", "Ressources pour communication", "Ressources internes", "Ressources externes",
+    ('grf', 'Gestion des Ressources Financières', [
+        ('Equilibre des recettes et des dépenses', 'Nous utilisons régulièrement les procédures établies pour maintenir nos recettes et nos dépenses équilibrées'),
+        ('Allocation des fonds', 'Le processus de budgétisation nous amène à allouer des fonds d’une manière qui reflète étroitement nos priorités organisationnelles'),
+        ('Prévisions financières', 'Nos prévisions financières sont exactes'),
+        ('Modification des dépenses', 'Nous modifions nos dépenses sur une base régulière chaque fois que nous avons des déficits de revenus'),
+        ('Evitement des perturbations', 'Notre système financier et nos procédures nous évitent des perturbations opérationnelles'),
+        ('Décaissements périodiques', 'Nos procédures de gestion des liquidités conduisent à des décaissements périodiques de fonds'),
+        ('Appui financier des bailleurs', 'Le niveau de l’appui financier de la part des bailleurs reste stable ou croissant'),
+        ('Moins de  dépendance', 'Nous prenons des mesures concrètes pour rendre notre organisation moins dépendante de quelques sources de financement'),
+        ('Ressources pour les activités', 'Le niveau de nos ressources disponibles pour les activités du projet est approprié pour accomplir notre mission'),
+        ('Ressources pour l’équipement', 'Le niveau de nos ressources disponibles pour l’équipement (bureaux, fournitures) est approprié pour accomplir notre mission'),
     ]),
-    ("parteq", "Participation Equitable", [
-        "Evaluation des besoins", "Conception des projets", "Suivi-évaluation des projets", "Accès aux activités", "Accès aux bénéfices", "Equité dans la conception", "Equité dans la mise en œuvre", "Examen des besoins", "Adaptation des activités", "Leadership local", "Capacités locales", "Implication des décideurs",
+    ('parteq', 'Gestion de la Participation Equitable', [
+        ('Evaluation des besoins', 'Les niveaux de participation dans l’évaluation des besoins sont élevés'),
+        ('Conception des projets', 'Les niveaux de participation dans la conception des projets sont élevés'),
+        ('Mise en œuvre des projets', 'Les niveaux de participation dans la mise en œuvre des projets sont élevés'),
+        ('Suivi et évaluation des projets', 'Les niveaux de participation dans le suivi et l’évaluation des projets sont élevés'),
+        ('Groupes sous-représentés et accès aux activités', 'Les groupes sous-représentés ont un accès équitable aux activités du projet'),
+        ('Groupes sous-représentés et bénéfice', 'Les groupes sous-représentés tirent un bénéfice équitable des activités du projet'),
+        ('Promotion de l’équité', 'Nos projets font constamment la promotion de l’équité à tous les niveaux de la conception et de la mise en œuvre des projets'),
+        ('Evaluation des changements', 'Nous examinons régulièrement les besoins des participants au projet pour évaluer s’ils changent.'),
+        ('Besoins changeants des participants', 'Nous modifions les projets pour refléter les besoins changeant des participants'),
+        ('Dialogue pour le développement équitable', 'Nous engageons régulièrement les décideurs et les institutions pertinents dans un dialogue qui contribue au développement équitable et participatif'),
     ]),
-    ("dur", "Durabilite (Perennisation) des Acquis du Programme", [
-        "D. économique pour conception", "D. politique pour conception", "D. institutionnelle pour conception", "D. sociale pour conception", "D. environnementale pour exécution", "D. économique exécution", "D. institutionnelle pour exécution", "D. sociale pour exécution", "D. environnementale pour S&E", "D. économique pour S&E", "D. institutionnelle pour S&E", "Appui technique",
+    ('dur', 'Gestion de la Durabilité des Acquis de l’organisation', [
+        ('Conception et D. environnementale', 'Au moment de la conception de nos projets, nous accordons une attention adéquate à la durabilité environnementale'),
+        ('Conception et D. économique', 'A la durabilité économique'),
+        ('Conception et D. institutionnelle', 'A la durabilité institutionnelle'),
+        ('Mise en œuvre et D. environnementale', 'En exécutant les projets, nous accordons une attention adéquate à la durabilité environnementale'),
+        ('Mise en œuvre et D. économique', 'A la durabilité économique'),
+        ('Mise en œuvre et D. institutionnelle', 'A la durabilité institutionnelle'),
+        ('Evaluation et D. environnementale', 'En faisant le suivi du projet et l’évaluation de l’impact, nous accordions une attention adéquate à la durabilité environnementale'),
+        ('Evaluation et D. économique', 'A la durabilité économique'),
+        ('Evaluation et D. institutionnelle', 'A la durabilité institutionnelle'),
+        ('Appui technique et durabilité', 'La qualité de l’appui technique pour nos activités de terrain contribue à la durabilité du projet'),
     ]),
-    ("partn", "Partenariat", [
-        "Liens avec les politiques", "Liens avec Secteur privé", "Liens avec ONG", "Liens avec autres CL", "Partenariats avec Organisations", "Suivi de l’efficacité", "Avantages financiers", "Compétences techniques", "Relations et réseaux nouveaux", "Informations partagées", "Confiance et coopération", "Objectifs partagés", "Participation à la coopération",
+    ('partn', 'Gestion du Partenariat', [
+        ('Liens avec les décideurs politiques', 'Nous établissons de nouveaux liens précieux avec les décideurs politiques pertinents'),
+        ('Liens avec le secteur privé', 'Nous établissons de nouveaux liens précieux avec les représentants du secteur privé'),
+        ('Partenariats avec d’autres Organisations', 'Nous nous engageons activement dans des partenariats productifs avec d’autres Organisations'),
+        ('Suivi de nos partenariats', 'Nous faisons le suivi de l’efficacité de nos partenariats avec les autres Organisations'),
+        ('Avantages financiers', 'A travers le partenariat nous obtenons des avantages financiers qui améliorent notre capacité pour accomplir notre mission'),
+        ('Compétences techniques', 'Et aussi des compétences techniques qui améliorent notre capacité à accomplir notre mission'),
+        ('Nouveaux réseaux et relations', 'Et aussi de nouveaux réseaux et des relations qui améliorent notre capacité à accomplir notre mission'),
+        ('Confiance et coopération', 'Les partenariats ont des mécanismes en place pour renforcer la confiance et la coopération'),
+        ('Contribution aux objectifs partagés', 'Les partenaires individuels contribuent de manière appropriée aux objectifs partagés'),
+        ('Effort de coopération', 'Les partenaires individuels participent aux bénéfices de l’effort de coopération'),
     ]),
-    ("gouv", "Gouvernance et Gestion Strategique", [
-        "Rapports aux bailleurs", "Mobilisation de fonds", "Relations publiques", "Plaidoyer", "Contrôle financier", "Définition de politiques", "Orientations stratégiques", "Représentation selon bénéficiaires", "Décisions du Conseil", "Décisions du personnel", "Personnel d’appoint", "Environnement externe", "Objectifs stratégiques", "Initiatives conformes", "Suivi régulier",
+    ('apporg', 'Gestion de l’Apprentissage Organisationnel', [
+        ('Evaluation des projets', 'Nous faisons régulièrement le suivi et l’évaluation de la mise en œuvre de nos projets'),
+        ('Implication des structures dans les défis', 'Nous impliquons régulièrement les structures dans la satisfaction des défis organisationnels majeurs'),
+        ('Interdépendance des structures', 'Nous reconnaissons l’interdépendance des différentes structures de notre Organisation lorsque nous analysons les problèmes'),
+        ('Informations pour le travail', 'Les membres ont régulièrement les informations dont ils ont besoin pour faire efficacement leur travail'),
+        ('Informations pour les priorités', 'Nous disposons d’informations appropriées pour répondre à nos priorités'),
+        ('Travail d’équipe pour les défis', 'Nous utilisons efficacement le travail d’équipe pour répondre aux défis organisationnels'),
+        ('Travail d’équipe pour les défis organisationnels', 'Les responsables utilisent efficacement la travail d’équipe pour répondre aux défis organisationnels'),
+        ('Réunions et apprentissage organisationnel', 'Nos réunions de personnel contribuent directement à l’apprentissage organisationnel.'),
+        ('Expression libre lors des réunions', 'Les membres se sentent généralement à l’aise pour s’exprimer lors des réunions de personnel'),
+        ('Prise de risque pour les innovateurs', 'Notre Organisation est une place sûre de prise de risque pour les innovateurs'),
+    ]),
+    ('gouv', 'Gestion Stratégique et Gouvernance', [
+        ('Rapportage pour les bailleurs', 'Notre système de rapportage pour les bailleurs de fonds montre une compréhension claire de leurs besoins et exigences'),
+        ('CC et mobilisation des fonds', 'Notre Comité de coordination a contribué à l’exécution des fonctions comme la mobilisation des fonds'),
+        ('CC et relations publiques', 'Comme les relations publiques'),
+        ('CC et plaidoyer', 'Comme le plaidoyer'),
+        ('CC et définition de politique', 'Comme la définition de politique'),
+        ('Représentation des bénéficiaires', 'Notre Comité de coordination a une représentation appropriée de nos principales bénéficiaires'),
+        ('Engagement et décisions prises', 'L’engagement par rapport à notre mission, à nos objectifs et à nos valeurs est systématiquement reflété dans les décisions prises par le Comité de coordination et le personnel'),
+        ('Planification stratégique et extérieur', 'Nous utilisons une planification stratégique pour nous examiner nous-mêmes par rapport à notre environnement externe'),
+        ('Initiatives et plans stratégiques', 'Nos initiatives sont élaborées et mises en œuvre conformément à nos plans stratégiques et opérationnels'),
+        ('Suivi du progrès', 'Régulièrement nous faisons le suivi du progrès dans l’accomplissement de nos objectifs stratégiques'),
     ]),
 ]
 
@@ -402,25 +470,30 @@ def init_db(db: sqlite3.Connection) -> None:
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
-    migrate_reference_questionnaire(db)
+    ensure_reference_questionnaire_version(db)
     migrate_v2_ownership(db)
 
 
-def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
-    """Keep the "EPC / SENEVAL" reference template aligned with EPC_DOMAINS.
+def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:
+    """Keep an up-to-date "EPC / SENEVAL" template version available WITHOUT ever
+    touching an existing version's domains/indicators/responses.
 
-    Runs on every startup but only acts when the stored domains/indicators
-    differ from EPC_DOMAINS (idempotent). A backup of the database is taken
-    before any destructive change, since existing workshops built on the old
-    (incorrect) reference content lose their per-question responses here —
-    an explicit, user-confirmed trade-off (see consignes_claude.txt point 5).
+    Runs on every startup (idempotent: a no-op once the latest version already
+    matches EPC_DOMAINS). Existing workshops stay pinned to whichever template
+    version they were created on (sessions.template_version), so their
+    historical responses are never altered by a referential correction here —
+    only a brand-new version is added, and new workshops/campaigns pick up the
+    latest version by default (see consignes_claude.txt: existing ateliers must
+    not be silently altered when their questionnaire is versioned; an automatic
+    migration that risks changing historical responses must NOT be done).
     """
     target_codes = [code for code, _, _ in EPC_DOMAINS]
     target_counts = {code: len(indicators) for code, _, indicators in EPC_DOMAINS}
-    tpl = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version DESC LIMIT 1").fetchone()
-    if not tpl:
+    latest = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version DESC LIMIT 1").fetchone()
+    if not latest:
+        seed_epc(db)
         return
-    tid = tpl["id"]
+    tid = latest["id"]
     domains = db.execute("SELECT id,code FROM domains WHERE template_id=? ORDER BY display_order", (tid,)).fetchall()
     up_to_date = [d["code"] for d in domains] == target_codes and all(
         db.execute("SELECT COUNT(*) FROM indicators WHERE domain_id=?", (d["id"],)).fetchone()[0] == target_counts[d["code"]]
@@ -429,49 +502,16 @@ def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
     if up_to_date:
         return
 
-    if DATABASE.exists():
-        backup = DATABASE.with_name(f"{DATABASE.stem}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}{DATABASE.suffix}")
-        try:
-            shutil.copy2(DATABASE, backup)
-        except OSError:
-            pass
-
-    old_domain_ids = [d["id"] for d in domains]
+    old = template_payload(db, tid)
+    version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name='EPC / SENEVAL'").fetchone()[0]
+    new_tid, stamp = str(uuid.uuid4()), now()
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_tid, "EPC / SENEVAL", version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
+    for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
+        did = str(uuid.uuid4())
+        db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, new_tid, code, label, "", d_order, 1))
+        for i_order, (reference, enonce) in enumerate(indicators, 1):
+            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, reference, enonce, "", "numeric", 1, i_order, 1, "{}"))
     db.commit()
-    db.execute("PRAGMA foreign_keys = OFF")
-    try:
-        if old_domain_ids:
-            dph = ",".join("?" * len(old_domain_ids))
-            indicator_ids = [r["id"] for r in db.execute(f"SELECT id FROM indicators WHERE domain_id IN ({dph})", old_domain_ids)]
-            if indicator_ids:
-                iph = ",".join("?" * len(indicator_ids))
-                db.execute(f"DELETE FROM responses WHERE indicator_id IN ({iph})", indicator_ids)
-                priority_ids = [r["id"] for r in db.execute(f"SELECT id FROM priorities WHERE indicator_id IN ({iph})", indicator_ids)]
-                if priority_ids:
-                    pph = ",".join("?" * len(priority_ids))
-                    db.execute(f"UPDATE workshop_recommendations SET priority_id=NULL WHERE priority_id IN ({pph})", priority_ids)
-                    db.execute(f"UPDATE training_topics SET priority_id=NULL WHERE priority_id IN ({pph})", priority_ids)
-                    entry_ids = [r["id"] for r in db.execute(f"SELECT id FROM analysis_entries WHERE priority_id IN ({pph})", priority_ids)]
-                    if entry_ids:
-                        eph = ",".join("?" * len(entry_ids))
-                        db.execute(f"UPDATE workshop_recommendations SET cause_id=NULL WHERE cause_id IN ({eph})", entry_ids)
-                        db.execute(f"UPDATE workshop_recommendations SET lever_id=NULL WHERE lever_id IN ({eph})", entry_ids)
-                        db.execute(f"DELETE FROM analysis_entries WHERE id IN ({eph})", entry_ids)
-                    db.execute(f"DELETE FROM priority_analyses WHERE priority_id IN ({pph})", priority_ids)
-                    db.execute(f"DELETE FROM priorities WHERE id IN ({pph})", priority_ids)
-                db.execute(f"UPDATE analysis_notes SET indicator_id=NULL WHERE indicator_id IN ({iph})", indicator_ids)
-                db.execute(f"UPDATE recommendations SET indicator_id=NULL WHERE indicator_id IN ({iph})", indicator_ids)
-                db.execute(f"DELETE FROM indicators WHERE id IN ({iph})", indicator_ids)
-            db.execute(f"DELETE FROM domains WHERE id IN ({dph})", old_domain_ids)
-        for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
-            did = str(uuid.uuid4())
-            db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
-            for i_order, indicator in enumerate(indicators, 1):
-                db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, f"{code}-{i_order:02d}", indicator, "", "numeric", 1, i_order, 1, "{}"))
-        db.execute("UPDATE templates SET updated_at=? WHERE id=?", (now(), tid))
-        db.commit()
-    finally:
-        db.execute("PRAGMA foreign_keys = ON")
 
 
 def migrate_v2_ownership(db: sqlite3.Connection) -> None:
@@ -548,8 +588,8 @@ def seed_epc(db: sqlite3.Connection) -> str:
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
         did = str(uuid.uuid4())
         db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
-        for i_order, indicator in enumerate(indicators, 1):
-            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, f"{code}-{i_order:02d}", indicator, "", "numeric", 1, i_order, 1, "{}"))
+        for i_order, (reference, enonce) in enumerate(indicators, 1):
+            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, reference, enonce, "", "numeric", 1, i_order, 1, "{}"))
     db.commit()
     return tid
 
@@ -771,7 +811,8 @@ def docx_bars_chart(items, mode, title, with_mean=False):
     data = [d for d in items if d.get("capacity") is not None]
     if with_mean and data:
         mc = sum(d["capacity"] for d in data) / len(data)
-        ms = sum(d["consensus"] for d in data) / len(data)
+        cons_data = [d for d in data if d.get("consensus") is not None]
+        ms = sum(d["consensus"] for d in cons_data) / len(cons_data) if cons_data else None
         gc = sum(d.get("gradedCapacity") or 0 for d in data) / len(data)
         gs = sum(d.get("gradedConsensus") or 0 for d in data) / len(data)
         data = data + [{"label": "Moyen", "code": "Moyen", "capacity": mc, "consensus": ms, "gradedCapacity": gc, "gradedConsensus": gs}]
@@ -821,7 +862,7 @@ def docx_bars_chart(items, mode, title, with_mean=False):
 
 def docx_grid_chart(items):
     """Quadrant scatter with numbered markers, raster twin of graduatedGrid() / pdf_grid_chart()."""
-    data = [d for d in items if d.get("capacity") is not None]
+    data = [d for d in items if d.get("capacity") is not None and d.get("consensus") is not None]
     w, h = 700, 620
     img = PILImage.new("RGB", (w, h), "white")
     draw = ImageDraw.Draw(img)
@@ -916,7 +957,8 @@ def docx_cohort_chart(items):
         draw.text((30, 60), "Pas encore de données disponibles pour l’analyse de cohorte.", font=f_axis, fill="black")
         return img
     mc = sum(d["capacity"] for d in data) / len(data)
-    ms = sum(d["consensus"] for d in data) / len(data)
+    cons_data = [d for d in data if d.get("consensus") is not None]
+    ms = sum(d["consensus"] for d in cons_data) / len(cons_data) if cons_data else None
     # Mirrors static/app.js cohort(): missing graded values count as 0, divided by
     # the full domain count (not just the domains that have a graded value).
     gc = sum(d.get("gradedCapacity") or 0 for d in data) / len(data)
