@@ -169,6 +169,8 @@ label{display:block;font-weight:600;font-size:.9rem;margin:.7rem 0 .3rem;color:v
 input,select,textarea{box-sizing:border-box;padding:.6rem .7rem;width:100%;margin:0;border:1px solid var(--gray-200);border-radius:8px;font:inherit;background:#fff;color:var(--gray-900)}
 input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--blue-600);outline-offset:2px}
 textarea{min-height:5rem;resize:vertical}
+.checkbox-row{display:flex;align-items:center;gap:.5rem;font-weight:600}
+.checkbox-row input{width:auto;padding:0;border:none}
 
 /* ---------- Buttons ---------- */
 button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;width:auto;padding:.65rem 1.15rem;margin:.15rem .15rem .15rem 0;border:0;border-radius:9px;background:var(--blue-600);color:#fff;font:inherit;font-weight:600;font-size:.92rem;cursor:pointer;transition:transform .12s,box-shadow .12s,background .12s,opacity .12s}

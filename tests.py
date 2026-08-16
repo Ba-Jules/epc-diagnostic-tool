@@ -8,9 +8,9 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.db=app.connect(Path(self.tmp.name)/'test.sqlite3'); app.init_db(self.db)
     def tearDown(self): self.db.close(); self.tmp.cleanup()
-    def test_epc_seed_has_seven_domains_and_seventy_indicators(self):
+    def test_epc_seed_has_six_domains_and_eighty_indicators(self):
         t=self.db.execute('select id from templates').fetchone()['id']; payload=app.template_payload(self.db,t)
-        self.assertEqual(len(payload['domains']),7); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),70)
+        self.assertEqual(len(payload['domains']),6); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),80)
     def test_grade_and_analysis_keep_raw_responses(self):
         t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']

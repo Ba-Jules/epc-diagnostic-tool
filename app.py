@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -70,27 +71,28 @@ def export_filename(*parts, ext: str) -> str:
     return f"{slug}_{datetime.now().strftime('%Y-%m-%d')}.{ext}"
 
 
+# Questionnaire EPC/SENEVAL de référence : libellés et ordre repris exactement du
+# questionnaire de terrain SEN029 (fichiers historiques identiques pour Louga, Matam
+# ELUS, Matam SERVICES et Saint-Louis) — 6 domaines, 80 indicateurs. Aucun libellé
+# reformulé ni inventé.
 EPC_DOMAINS = [
-    ("grh", "Gestion des ressources humaines", [
-        "Formation au personnel", "Priorités de notre organisation", "Compétences pour notre mission", "Nombre du personnel", "Diversité de nos bénéficiaires", "Recrutement des membres", "Évaluation du personnel", "Résolution des conflits", "Allocation des tâches", "Pratiques de supervision",
+    ("grh", "Gestion des Ressources Humaines", [
+        "Recrutement transparent", "Transdisciplinarité", "Egalité de genre", "Parité H/F", "Diversité du personnel", "Profil du personnel", "Compétences du personnel", "Effectif du personnel", "Formations régulières", "Formations adaptées", "Formation selon priorités", "Motivation", "Gestion des conflits", "Supervision", "Evaluation",
     ]),
-    ("grf", "Gestion des ressources financières", [
-        "Équilibre des recettes et des dépenses", "Allocation des fonds", "Prévisions financières", "Modification des dépenses", "Évitement des perturbations", "Décaissements périodiques", "Appui financier des bailleurs", "Moins de dépendance", "Ressources pour les activités", "Ressources pour l’équipement",
+    ("grf", "Gestion des Ressources Financieres", [
+        "Procédures régulières", "Budgétisation selon priorités", "Prévisions financières", "Dépenses selon revenus", "Charges fixes", "Décaissements périodiques", "Appui de l’Etat", "Appui des Partenaires", "Ressources pour activités", "Ressources pour infrastructures", "Ressources pour communication", "Ressources internes", "Ressources externes",
     ]),
-    ("parteq", "Participation équitable", [
-        "Évaluation des besoins", "Conception des projets", "Mise en œuvre des projets", "Suivi et évaluation des projets", "Accès aux activités", "Bénéfice équitable", "Promotion de l’équité", "Évaluation des changements", "Besoins changeants des participants", "Dialogue pour le développement équitable",
+    ("parteq", "Participation Equitable", [
+        "Evaluation des besoins", "Conception des projets", "Suivi-évaluation des projets", "Accès aux activités", "Accès aux bénéfices", "Equité dans la conception", "Equité dans la mise en œuvre", "Examen des besoins", "Adaptation des activités", "Leadership local", "Capacités locales", "Implication des décideurs",
     ]),
-    ("dur", "Durabilité des acquis", [
-        "Durabilité environnementale à la conception", "Durabilité économique à la conception", "Durabilité institutionnelle à la conception", "Durabilité environnementale à la mise en œuvre", "Durabilité économique à la mise en œuvre", "Durabilité institutionnelle à la mise en œuvre", "Durabilité environnementale au suivi-évaluation", "Durabilité économique au suivi-évaluation", "Durabilité institutionnelle au suivi-évaluation", "Appui technique et durabilité",
+    ("dur", "Durabilite (Perennisation) des Acquis du Programme", [
+        "D. économique pour conception", "D. politique pour conception", "D. institutionnelle pour conception", "D. sociale pour conception", "D. environnementale pour exécution", "D. économique exécution", "D. institutionnelle pour exécution", "D. sociale pour exécution", "D. environnementale pour S&E", "D. économique pour S&E", "D. institutionnelle pour S&E", "Appui technique",
     ]),
     ("partn", "Partenariat", [
-        "Liens avec les décideurs politiques", "Liens avec le secteur privé", "Partenariats avec d’autres organisations", "Suivi de nos partenariats", "Avantages financiers", "Compétences techniques", "Nouveaux réseaux et relations", "Confiance et coopération", "Contribution aux objectifs partagés", "Effort de coopération",
+        "Liens avec les politiques", "Liens avec Secteur privé", "Liens avec ONG", "Liens avec autres CL", "Partenariats avec Organisations", "Suivi de l’efficacité", "Avantages financiers", "Compétences techniques", "Relations et réseaux nouveaux", "Informations partagées", "Confiance et coopération", "Objectifs partagés", "Participation à la coopération",
     ]),
-    ("apporg", "Apprentissage organisationnel", [
-        "Évaluation des projets", "Implication des structures dans les défis", "Interdépendance des structures", "Informations pour le travail", "Informations pour les priorités", "Travail d’équipe pour les défis", "Travail d’équipe des responsables", "Réunions et apprentissage organisationnel", "Expression libre lors des réunions", "Prise de risque pour les innovateurs",
-    ]),
-    ("gouv", "Gestion stratégique et gouvernance", [
-        "Rapportage pour les bailleurs", "Mobilisation des fonds", "Relations publiques", "Plaidoyer", "Définition de politique", "Représentation des bénéficiaires", "Engagement et décisions prises", "Planification stratégique et environnement externe", "Initiatives et plans stratégiques", "Suivi du progrès",
+    ("gouv", "Gouvernance et Gestion Strategique", [
+        "Rapports aux bailleurs", "Mobilisation de fonds", "Relations publiques", "Plaidoyer", "Contrôle financier", "Définition de politiques", "Orientations stratégiques", "Représentation selon bénéficiaires", "Décisions du Conseil", "Décisions du personnel", "Personnel d’appoint", "Environnement externe", "Objectifs stratégiques", "Initiatives conformes", "Suivi régulier",
     ]),
 ]
 
@@ -363,6 +365,75 @@ def init_db(db: sqlite3.Connection) -> None:
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
+    migrate_reference_questionnaire(db)
+
+
+def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
+    """Keep the "EPC / SENEVAL" reference template aligned with EPC_DOMAINS.
+
+    Runs on every startup but only acts when the stored domains/indicators
+    differ from EPC_DOMAINS (idempotent). A backup of the database is taken
+    before any destructive change, since existing workshops built on the old
+    (incorrect) reference content lose their per-question responses here —
+    an explicit, user-confirmed trade-off (see consignes_claude.txt point 5).
+    """
+    target_codes = [code for code, _, _ in EPC_DOMAINS]
+    target_counts = {code: len(indicators) for code, _, indicators in EPC_DOMAINS}
+    tpl = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version DESC LIMIT 1").fetchone()
+    if not tpl:
+        return
+    tid = tpl["id"]
+    domains = db.execute("SELECT id,code FROM domains WHERE template_id=? ORDER BY display_order", (tid,)).fetchall()
+    up_to_date = [d["code"] for d in domains] == target_codes and all(
+        db.execute("SELECT COUNT(*) FROM indicators WHERE domain_id=?", (d["id"],)).fetchone()[0] == target_counts[d["code"]]
+        for d in domains
+    )
+    if up_to_date:
+        return
+
+    if DATABASE.exists():
+        backup = DATABASE.with_name(f"{DATABASE.stem}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}{DATABASE.suffix}")
+        try:
+            shutil.copy2(DATABASE, backup)
+        except OSError:
+            pass
+
+    old_domain_ids = [d["id"] for d in domains]
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        if old_domain_ids:
+            dph = ",".join("?" * len(old_domain_ids))
+            indicator_ids = [r["id"] for r in db.execute(f"SELECT id FROM indicators WHERE domain_id IN ({dph})", old_domain_ids)]
+            if indicator_ids:
+                iph = ",".join("?" * len(indicator_ids))
+                db.execute(f"DELETE FROM responses WHERE indicator_id IN ({iph})", indicator_ids)
+                priority_ids = [r["id"] for r in db.execute(f"SELECT id FROM priorities WHERE indicator_id IN ({iph})", indicator_ids)]
+                if priority_ids:
+                    pph = ",".join("?" * len(priority_ids))
+                    db.execute(f"UPDATE workshop_recommendations SET priority_id=NULL WHERE priority_id IN ({pph})", priority_ids)
+                    db.execute(f"UPDATE training_topics SET priority_id=NULL WHERE priority_id IN ({pph})", priority_ids)
+                    entry_ids = [r["id"] for r in db.execute(f"SELECT id FROM analysis_entries WHERE priority_id IN ({pph})", priority_ids)]
+                    if entry_ids:
+                        eph = ",".join("?" * len(entry_ids))
+                        db.execute(f"UPDATE workshop_recommendations SET cause_id=NULL WHERE cause_id IN ({eph})", entry_ids)
+                        db.execute(f"UPDATE workshop_recommendations SET lever_id=NULL WHERE lever_id IN ({eph})", entry_ids)
+                        db.execute(f"DELETE FROM analysis_entries WHERE id IN ({eph})", entry_ids)
+                    db.execute(f"DELETE FROM priority_analyses WHERE priority_id IN ({pph})", priority_ids)
+                    db.execute(f"DELETE FROM priorities WHERE id IN ({pph})", priority_ids)
+                db.execute(f"UPDATE analysis_notes SET indicator_id=NULL WHERE indicator_id IN ({iph})", indicator_ids)
+                db.execute(f"UPDATE recommendations SET indicator_id=NULL WHERE indicator_id IN ({iph})", indicator_ids)
+                db.execute(f"DELETE FROM indicators WHERE id IN ({iph})", indicator_ids)
+            db.execute(f"DELETE FROM domains WHERE id IN ({dph})", old_domain_ids)
+        for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
+            did = str(uuid.uuid4())
+            db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
+            for i_order, indicator in enumerate(indicators, 1):
+                db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, f"{code}-{i_order:02d}", indicator, "", "numeric", 1, i_order, 1, "{}"))
+        db.execute("UPDATE templates SET updated_at=? WHERE id=?", (now(), tid))
+        db.commit()
+    finally:
+        db.execute("PRAGMA foreign_keys = ON")
 
 
 def seed_epc(db: sqlite3.Connection) -> str:
@@ -1426,6 +1497,9 @@ class Handler(SimpleHTTPRequestHandler):
             if path.endswith("/recommendations"):
                 sid=path.split("/")[3]; db.execute("INSERT INTO recommendations VALUES (?,?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),sid,data.get("indicatorId"),data["title"],data.get("description",""),data.get("lever",""),data.get("kind","action"),data.get("owner",""),data.get("horizon",""),now())); db.commit(); return self.json(201,{"ok":True})
             return self.json(404, {"error": "Route inconnue"})
+        except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
+        except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
+        except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
     def do_PUT(self):
@@ -1475,8 +1549,14 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/domains/"):
                 did=path.split("/")[3]; db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",(data["label"],data.get("description",""),int(data.get("displayOrder",1)),int(data.get("active",True)),did)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
-                iid=path.split("/")[3]; db.execute("UPDATE indicators SET domain_id=?,code=?,label=?,description=?,response_type=?,required=?,display_order=?,active=?,configuration_json=? WHERE id=?",(data["domainId"],data["code"],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder",1)),int(data.get("active",True)),json.dumps(data.get("configuration",{})),iid)); db.commit(); return self.json(200,{"ok":True})
+                iid=path.split("/")[3]
+                if not (data.get("code") or "").strip(): return self.json(400,{"error":"La référence est obligatoire."})
+                if not (data.get("label") or "").strip(): return self.json(400,{"error":"La question est obligatoire."})
+                db.execute("UPDATE indicators SET domain_id=?,code=?,label=?,description=?,response_type=?,required=?,display_order=?,active=?,configuration_json=? WHERE id=?",(data["domainId"],data["code"],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder",1)),int(data.get("active",True)),json.dumps(data.get("configuration",{})),iid)); db.commit(); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
+        except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
+        except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
+        except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
     def do_DELETE(self):
@@ -1503,8 +1583,19 @@ class Handler(SimpleHTTPRequestHandler):
                     if parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1": db.execute("UPDATE templates SET status='archived',updated_at=? WHERE id=?",(now(),tid)); db.commit(); return self.json(200,{"ok":True,"archived":True})
                     return self.json(409,{"error":"Suppression impossible. Ce questionnaire est utilisé par une ou plusieurs sessions d’atelier. Vous pouvez le conserver, créer une nouvelle version, ou confirmer son retrait de la liste des modèles."})
                 db.execute("DELETE FROM indicators WHERE domain_id IN (SELECT id FROM domains WHERE template_id=?)",(tid,)); db.execute("DELETE FROM domains WHERE template_id=?",(tid,)); db.execute("DELETE FROM templates WHERE id=?",(tid,)); db.commit(); return self.json(200,{"ok":True})
+            if path.startswith("/api/domains/"):
+                did=path.split("/")[3]
+                affected=rows(db,"SELECT DISTINCT s.id,s.name FROM sessions s JOIN responses r ON r.session_id=s.id JOIN indicators i ON i.id=r.indicator_id WHERE i.domain_id=?",(did,))
+                if affected:
+                    names=", ".join(a["name"] for a in affected)
+                    return self.json(409,{"error":f"Suppression impossible : ce domaine contient des réponses dans {len(affected)} atelier(s) ({names}). Désactivez-le plutôt pour préserver l'historique.","sessions":affected})
+                db.execute("DELETE FROM indicators WHERE domain_id=?",(did,)); db.execute("DELETE FROM domains WHERE id=?",(did,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
-                iid=path.split("/")[3]; db.execute("DELETE FROM indicators WHERE id=?",(iid,)); db.commit(); return self.json(200,{"ok":True})
+                iid=path.split("/")[3]
+                used=db.execute("SELECT COUNT(*) FROM responses WHERE indicator_id=?",(iid,)).fetchone()[0]
+                if used:
+                    return self.json(409,{"error":f"Suppression impossible : {used} réponse(s) sont déjà enregistrées pour cette question. Désactivez-la plutôt pour préserver l'historique.","dependencies":used})
+                db.execute("DELETE FROM indicators WHERE id=?",(iid,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and "/priorities/" in path:
                 parts=path.split("/"); db.execute("DELETE FROM priorities WHERE session_id=? AND indicator_id=?",(parts[3],parts[5])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and len(path.rstrip("/").split("/")) == 4:
@@ -1513,6 +1604,9 @@ class Handler(SimpleHTTPRequestHandler):
                     db.execute(f"DELETE FROM {table} WHERE session_id=?",(sid,))
                 db.execute("DELETE FROM sessions WHERE id=?",(sid,)); db.commit(); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
+        except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
+        except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
+        except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
     def serve_static(self, path):
