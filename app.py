@@ -1373,11 +1373,29 @@ def analysis(db, session_id: str):
     return result
 
 
+def generate_group_code(db, name):
+    """group_code is only ever used for display/filenames, never as a data-selection
+    key — but it's generated globally unique across every campaign anyway, defensively,
+    so it can never become one without a future change silently reintroducing an ambiguity.
+    """
+    all_codes = {r["group_code"] for r in db.execute("SELECT group_code FROM sessions WHERE group_code IS NOT NULL")}
+    base_code = slugify(name)[:3].upper() or "GRP"
+    n = 1
+    while f"{base_code}-{n:02d}" in all_codes: n += 1
+    return f"{base_code}-{n:02d}"
+
+
 def analysis_for(db, session_ids: list[str]):
     """Same EPC calculation as analysis(), pooling responses/participants over
     one or several session ids. A single id behaves exactly as before; several
     ids (same template) is what powers campaign consolidation — the maths are
     never a mean-of-means, they recompute directly from individual responses.
+
+    Capacité/consensus are computed only from participants with status='completed'
+    (a questionnaire opened but abandoned mid-way must never silently shift the
+    published score) — participantCount below still counts every participant
+    row (started or completed) so "commencés" stays visible separately from
+    "validés"/completedCount.
     """
     if not session_ids:
         return None
@@ -1395,7 +1413,7 @@ def analysis_for(db, session_ids: list[str]):
         indicators = [i for i in domain["indicators"] if i["active"]]
         output_indicators, participant_means = [], {}
         for indicator in indicators:
-            response_rows = rows(db, f"SELECT participant_id,value_json FROM responses WHERE session_id IN ({ph}) AND indicator_id=?", (*session_ids, indicator["id"]))
+            response_rows = rows(db, f"SELECT r.participant_id,r.value_json FROM responses r JOIN participants p ON p.id=r.participant_id WHERE r.session_id IN ({ph}) AND r.indicator_id=? AND p.status='completed'", (*session_ids, indicator["id"]))
             values = [float(json.loads(r["value_json"])) for r in response_rows if isinstance(json.loads(r["value_json"]), (int, float))]
             for r in response_rows:
                 value = json.loads(r["value_json"])
@@ -1644,12 +1662,9 @@ class Handler(SimpleHTTPRequestHandler):
                 camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
                 if not camp: return self.json(404, {"error": "Campagne introuvable."})
                 if not (data.get("name") or "").strip(): return self.json(400, {"error": "Le nom du groupe est obligatoire."})
-                existing_codes = {r["group_code"] for r in db.execute("SELECT group_code FROM sessions WHERE campaign_id=?", (cid,))}
-                base_code = slugify(data["name"])[:3].upper() or "GRP"
-                n = 1
-                while f"{base_code}-{n:02d}" in existing_codes: n += 1
-                group_code = f"{base_code}-{n:02d}"
-                group_color = GROUP_COLORS[len(existing_codes) % len(GROUP_COLORS)]
+                campaign_codes = {r["group_code"] for r in db.execute("SELECT group_code FROM sessions WHERE campaign_id=?", (cid,))}
+                group_code = generate_group_code(db, data["name"])
+                group_color = GROUP_COLORS[len(campaign_codes) % len(GROUP_COLORS)]
                 sid = str(uuid.uuid4())
                 raw_token = secrets.token_urlsafe(24)
                 db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, camp["template_id"], camp["template_version"], data["name"], "", "", "", "open", now(), None, "", int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"], cid, group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token)))
