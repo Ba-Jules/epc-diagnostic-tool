@@ -471,8 +471,9 @@ async function preview(sid){let a=await api('/api/sessions/'+sid+'/analysis'),t=
   if(!d.participant){try{localStorage.removeItem(participantKey(sid))}catch(_){}return join(sid)}
   if(d.participant.status==='completed'){try{localStorage.setItem(participantKey(sid),JSON.stringify({pid,completed:true,anonymous:participantAnonymous}))}catch(_){}return participantDoneScreen(sid,pid)}
   participantName=participantAnonymous?'':(d.participant.display_name||'');
-  page(sid,pid,d.template,d.session,d.responses,0,false);
+  page(sid,pid,d.template,d.session,d.responses,resumeDomainIndex(d.template,d.responses),false);
 }
+function resumeDomainIndex(t,r){let ds=activeDomains(t);for(let n=0;n<ds.length;n++){if(ds[n].indicators.some(i=>r[i.id]===undefined))return n}return Math.max(0,ds.length-1)}
 function scaleLegend(t){let min=+t.scale.min,max=+t.scale.max,labels=t.scale.labels||{},parts=Array.from({length:max-min+1},(_,k)=>max-k).map(v=>labels[v]?`${v} = ${esc(labels[v])}`:null).filter(Boolean);return parts.length?`<div class="scale-legend"><b>Échelle de notation :</b> ${parts.join(' | ')}</div>`:''}
 async function setParticipantName(v){participantName=v;if(ctx&&ctx.pid&&!ctx.pre){try{await api('/api/participants/'+ctx.pid,{method:'PUT',body:JSON.stringify({displayName:v})})}catch(_){}}}
 async function setAnonymous(v){participantAnonymous=v;if(v){await setParticipantName('')}try{localStorage.setItem(participantKey(ctx.sid),JSON.stringify({pid:ctx.pid,completed:false,anonymous:v}))}catch(_){}page(ctx.sid,ctx.pid,ctx.t,ctx.s,ctx.r,ctx.n,ctx.pre)}
