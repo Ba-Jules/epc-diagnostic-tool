@@ -172,6 +172,11 @@ GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"
 
 GRADING = [(0, 22, 5), (23, 32, 10), (33, 39, 15), (40, 45, 20), (46, 50, 25), (51, 55, 30), (56, 59, 35), (60, 63, 40), (64, 67, 45), (68, 71, 50), (72, 74, 55), (75, 78, 60), (79, 81, 65), (82, 84, 70), (85, 87, 75), (88, 89, 80), (90, 92, 85), (93, 95, 90), (96, 98, 95), (99, 100, 100)]
 
+# Every table that hangs off a session row via session_id — deleting a session (alone,
+# or as part of a campaign cascade) always means deleting exactly these first.
+SESSION_CHILD_TABLES = ("training_topics", "workshop_recommendations", "analysis_entries", "priority_analyses",
+                         "analysis_notes", "recommendations", "responses", "priorities", "participants", "session_report_meta")
+
 # ==================================================
 # ASSISTANT IA OPTIONNEL — couche multi-fournisseur
 # ==================================================
@@ -333,7 +338,7 @@ AI_SYSTEM_BASE = ("Tu assistes un modérateur d'atelier de diagnostic organisati
 def ai_epc_context(db, sid):
     a = analysis(db, sid)
     g = a["global"]
-    lines = [f"Atelier : {a['session']['name']}", f"Participants : {a['participantCount']} · questionnaires validés : {a['completedCount']}",
+    lines = [f"Atelier : {a['session']['name']}", f"Commencés : {a['participantCount']} · Validés : {a['completedCount']}",
         f"Capacité globale : {_n(g['capacity'])}/100 · Consensus global : {_c(g)}/100 "
         f"(graduées : capacité {g['gradedCapacity']}, consensus {g['gradedConsensus']})", "", "Résultats par domaine :"]
     for d in a["domains"]:
@@ -629,7 +634,7 @@ def campaign_kits_zip(db: sqlite3.Connection, campaign_id: str, base_url: str) -
 <h1>{esc_html(camp['name'])}</h1>
 <h2>Groupe : {esc_html(g['name'])} {f"({esc_html(g['group_code'])})" if g['group_code'] else ''}</h2>
 <p><b>Relais :</b> {esc_html(g['relay_name'] or 'Non renseigné')}</p>
-<p><b>Participants prévus :</b> {g['expected_participants'] or 'Non défini'}</p>
+<p><b>Objectif (participants prévus) :</b> {g['expected_participants'] or 'Non défini'}</p>
 <hr>
 <p><b>Lien participant</b> (à transmettre / afficher en QR) :<br><a href="{participant_link}">{participant_link}</a></p>
 <p><b>Lien de suivi relais</b> (votre tableau de bord + votre QR code) :<br><a href="{relay_link}">{relay_link}</a></p>
@@ -1385,6 +1390,68 @@ def generate_group_code(db, name):
     return f"{base_code}-{n:02d}"
 
 
+def campaign_deletion_summary(db, campaign_id):
+    """Read-only inventory shown to a pilote before they confirm a permanent
+    campaign deletion (or select it in the test-data cleanup tool). Never
+    mutates anything."""
+    camp = db.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+    if not camp:
+        return None
+    groups = rows(db, """SELECT s.id,s.name,s.group_code,s.relay_name,s.expected_participants,
+        (SELECT COUNT(*) FROM participants p WHERE p.session_id=s.id) AS participant_count,
+        (SELECT COUNT(*) FROM participants p WHERE p.session_id=s.id AND p.status='completed') AS completed_count,
+        (SELECT COUNT(*) FROM responses r WHERE r.session_id=s.id) AS response_count,
+        (SELECT COUNT(*) FROM priority_analyses a WHERE a.session_id=s.id) AS analysis_count,
+        (SELECT COUNT(*) FROM workshop_recommendations w WHERE w.session_id=s.id) AS recommendation_count
+        FROM sessions s WHERE s.campaign_id=? ORDER BY s.created_at""", (campaign_id,))
+    return {
+        "campaign": dict(camp),
+        "groups": groups,
+        "responseCount": sum(g["response_count"] for g in groups),
+        "participantCount": sum(g["participant_count"] for g in groups),
+        "completedCount": sum(g["completed_count"] for g in groups),
+        "analysisCount": sum(g["analysis_count"] + g["recommendation_count"] for g in groups),
+    }
+
+
+def delete_group_cascade(db, campaign_id, session_id, force=False):
+    """Same force-bypass idiom as delete_campaign_cascade, but for a single
+    group within a campaign. Scoped by both session_id and campaign_id so it
+    can never delete a group belonging to a different campaign."""
+    used = db.execute("SELECT COUNT(*) FROM responses WHERE session_id=?", (session_id,)).fetchone()[0]
+    if used and not force:
+        return False, used
+    for table in SESSION_CHILD_TABLES:
+        db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+    db.execute("DELETE FROM sessions WHERE id=? AND campaign_id=?", (session_id, campaign_id))
+    db.commit()
+    return True, used
+
+
+def delete_campaign_cascade(db, campaign_id, force=False):
+    """Permanently deletes a campaign and everything scoped under it (groups =
+    sessions with this campaign_id, and every SESSION_CHILD_TABLES row for
+    each of those groups). Never touches templates/domains/indicators (the
+    questionnaire is always shared, never campaign-owned) and never touches a
+    row belonging to another campaign or another pilote, since every DELETE
+    below is scoped by session_id/campaign_id.
+
+    Without force=True, refuses (returns deleted=False) if the campaign
+    already has recorded responses, mirroring the confirmation the pilote
+    sees on screen before they can pass force=True.
+    """
+    used = db.execute("SELECT COUNT(*) FROM responses r JOIN sessions s ON s.id=r.session_id WHERE s.campaign_id=?", (campaign_id,)).fetchone()[0]
+    if used and not force:
+        return False, used
+    for r in db.execute("SELECT id FROM sessions WHERE campaign_id=?", (campaign_id,)).fetchall():
+        for table in SESSION_CHILD_TABLES:
+            db.execute(f"DELETE FROM {table} WHERE session_id=?", (r["id"],))
+        db.execute("DELETE FROM sessions WHERE id=?", (r["id"],))
+    db.execute("DELETE FROM campaigns WHERE id=?", (campaign_id,))
+    db.commit()
+    return True, used
+
+
 def analysis_for(db, session_ids: list[str]):
     """Same EPC calculation as analysis(), pooling responses/participants over
     one or several session ids. A single id behaves exactly as before; several
@@ -1544,6 +1611,9 @@ class Handler(SimpleHTTPRequestHandler):
                     (SELECT COUNT(*) FROM participants p WHERE p.session_id=s.id) AS participant_count,
                     (SELECT COUNT(*) FROM participants p WHERE p.session_id=s.id AND p.status='completed') AS completed_count
                     FROM sessions s WHERE s.campaign_id=? ORDER BY s.created_at""", (cid,)))
+            if path.startswith("/api/campaigns/") and path.endswith("/deletion-summary"):
+                s = campaign_deletion_summary(db, path.split("/")[3])
+                return self.json(200, s) if s else self.json(404, {"error": "Campagne introuvable."})
             if path.startswith("/api/campaigns/") and path.endswith("/kits.zip"):
                 cid = path.split("/")[3]
                 base_url = f"{self.headers.get('X-Forwarded-Proto','http')}://{self.headers.get('Host','')}"
@@ -1682,7 +1752,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if len(templates_used) > 1:
                     return self.json(409, {"error": "Ces groupes utilisent des questionnaires différents et ne peuvent pas être consolidés directement."})
                 result = analysis_for(db, session_ids)
-                result["groups"] = rows(db, f"SELECT id,name,group_code,group_color FROM sessions WHERE id IN ({placeholders})", session_ids)
+                result["groups"] = rows(db, f"""SELECT id,name,group_code,group_color,expected_participants,
+                    (SELECT COUNT(*) FROM participants p WHERE p.session_id=sessions.id) AS participant_count,
+                    (SELECT COUNT(*) FROM participants p WHERE p.session_id=sessions.id AND p.status='completed') AS completed_count
+                    FROM sessions WHERE id IN ({placeholders})""", session_ids)
                 return self.json(200, result)
             if path.startswith("/api/campaigns/") and "/groups/" in path and path.endswith("/regenerate-relay"):
                 parts = path.split("/"); sid = parts[5]
@@ -1972,23 +2045,18 @@ class Handler(SimpleHTTPRequestHandler):
             user = self.require_auth(path, db)
             if path.startswith("/api/campaigns/") and "/groups/" in path:
                 cid, sid = path.split("/")[3], path.split("/")[5]
-                used = db.execute("SELECT COUNT(*) FROM responses WHERE session_id=?", (sid,)).fetchone()[0]
-                if used:
-                    return self.json(409, {"error": f"Suppression impossible : {used} réponse(s) déjà enregistrées pour ce groupe. Vous pouvez le clôturer plutôt que le supprimer.", "dependencies": used})
-                for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
-                    db.execute(f"DELETE FROM {table} WHERE session_id=?", (sid,))
-                db.execute("DELETE FROM sessions WHERE id=? AND campaign_id=?", (sid, cid)); db.commit(); return self.json(200, {"ok": True})
+                force = parse_qs(urlparse(self.path).query).get("force", ["0"])[0] == "1"
+                deleted, used = delete_group_cascade(db, cid, sid, force=force)
+                if not deleted:
+                    return self.json(409, {"error": f"Suppression impossible : {used} réponse(s) déjà enregistrées pour ce groupe. Vous pouvez le clôturer plutôt que le supprimer, ou confirmer la suppression définitive.", "dependencies": used})
+                return self.json(200, {"ok": True})
             if path.startswith("/api/campaigns/"):
                 cid = path.rsplit("/", 1)[1]
-                used = db.execute("SELECT COUNT(*) FROM responses r JOIN sessions s ON s.id=r.session_id WHERE s.campaign_id=?", (cid,)).fetchone()[0]
-                if used:
-                    return self.json(409, {"error": f"Suppression impossible : cette campagne contient {used} réponse(s) enregistrées. Clôturez-la plutôt que de la supprimer.", "dependencies": used})
-                group_ids = [r["id"] for r in db.execute("SELECT id FROM sessions WHERE campaign_id=?", (cid,))]
-                for sid in group_ids:
-                    for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
-                        db.execute(f"DELETE FROM {table} WHERE session_id=?", (sid,))
-                    db.execute("DELETE FROM sessions WHERE id=?", (sid,))
-                db.execute("DELETE FROM campaigns WHERE id=?", (cid,)); db.commit(); return self.json(200, {"ok": True})
+                force = parse_qs(urlparse(self.path).query).get("force", ["0"])[0] == "1"
+                deleted, used = delete_campaign_cascade(db, cid, force=force)
+                if not deleted:
+                    return self.json(409, {"error": f"Suppression impossible : cette campagne contient {used} réponse(s) enregistrées. Clôturez-la plutôt que de la supprimer, ou confirmez la suppression définitive.", "dependencies": used})
+                return self.json(200, {"ok": True, "forced": force, "responsesDeleted": used})
             if path.startswith("/api/sessions/") and "/ai/report-block/" in path:
                 sid=path.split("/")[3]; section=path.rsplit("/",1)[1]
                 db.execute("DELETE FROM report_ai_blocks WHERE session_id=? AND section_key=?",(sid,section)); db.commit(); return self.json(200,{"ok":True})
@@ -2027,7 +2095,7 @@ class Handler(SimpleHTTPRequestHandler):
                 parts=path.split("/"); db.execute("DELETE FROM priorities WHERE session_id=? AND indicator_id=?",(parts[3],parts[5])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and len(path.rstrip("/").split("/")) == 4:
                 sid=path.rstrip("/").split("/")[3]
-                for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
+                for table in SESSION_CHILD_TABLES:
                     db.execute(f"DELETE FROM {table} WHERE session_id=?",(sid,))
                 db.execute("DELETE FROM sessions WHERE id=?",(sid,)); db.commit(); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
