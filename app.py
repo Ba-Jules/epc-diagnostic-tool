@@ -711,6 +711,8 @@ class StructuralEditForbiddenError(Exception):
 CANONICAL_STRUCTURE_MESSAGES = {
     "add": "Ajout impossible : EPC / SENEVAL est le questionnaire de référence et doit garder exactement sa structure validée (7 domaines / 70 indicateurs, dans l'ordre validé). Dupliquez-le pour créer votre propre questionnaire modifiable.",
     "delete": "Suppression impossible : EPC / SENEVAL est le questionnaire de référence et doit garder exactement sa structure validée (7 domaines / 70 indicateurs, dans l'ordre validé). Dupliquez-le pour créer votre propre questionnaire modifiable.",
+    "edit": "Modification impossible : EPC / SENEVAL est le questionnaire de référence et doit garder exactement son contenu validé. Dupliquez-le pour créer votre propre questionnaire modifiable.",
+    "delete_template": "Suppression impossible. EPC/SENEVAL est le modèle de référence ; dupliquez-le pour le modifier.",
 }
 
 
@@ -767,6 +769,30 @@ def ensure_private_templates_for_started_sessions(db: sqlite3.Connection) -> Non
     re-run: a no-op for sessions already on an exclusive template."""
     for s in rows(db, "SELECT DISTINCT session_id AS id FROM participants"):
         ensure_private_template(db, s["id"])
+
+
+def delete_session(db: sqlite3.Connection, sid: str) -> bool:
+    """Permanently delete a mission and all its data. If its questionnaire is a private fork
+    (status='session_locked') that belongs exclusively to this mission — never the canonical
+    template, never a template still referenced by another session — delete that fork too, so
+    private forks don't outlive the one mission they were created for. Returns True if the fork
+    was dropped, for tests/diagnostics."""
+    session_row = db.execute("SELECT template_id FROM sessions WHERE id=?", (sid,)).fetchone()
+    drop_template, tid = False, None
+    if session_row:
+        tid = session_row["template_id"]
+        tpl = db.execute("SELECT status,is_canonical FROM templates WHERE id=?", (tid,)).fetchone()
+        other_ref = db.execute("SELECT 1 FROM sessions WHERE template_id=? AND id!=? LIMIT 1", (tid, sid)).fetchone()
+        drop_template = bool(tpl and not tpl["is_canonical"] and tpl["status"] == "session_locked" and not other_ref)
+    for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
+        db.execute(f"DELETE FROM {table} WHERE session_id=?", (sid,))
+    db.execute("DELETE FROM sessions WHERE id=?", (sid,))
+    if drop_template:
+        db.execute("DELETE FROM indicators WHERE domain_id IN (SELECT id FROM domains WHERE template_id=?)", (tid,))
+        db.execute("DELETE FROM domains WHERE template_id=?", (tid,))
+        db.execute("DELETE FROM templates WHERE id=?", (tid,))
+    db.commit()
+    return drop_template
 
 
 def create_blank_template(db, data, owner_user_id=None):
@@ -1581,8 +1607,8 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/auth/me":
                 return self.json(200, {"user": {"id": user["id"], "email": user["email"], "role": user["role"], "displayName": user["display_name"]} if user else None})
             if path == "/api/templates":
-                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' ORDER BY name,version DESC"))
-                return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY name,version DESC", (user["id"],)))
+                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at,is_canonical FROM templates WHERE status='active' ORDER BY is_canonical DESC,name,version DESC"))
+                return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at,is_canonical FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY is_canonical DESC,name,version DESC", (user["id"],)))
             if path == "/api/templates/matrix.xlsx":
                 data=blank_matrix_xlsx(); name=export_filename("matrice-questionnaire-vierge", ext="xlsx"); self.send_response(200); self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); self.send_header("Content-Disposition",f"attachment; filename={name}"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/templates/") and path.endswith("/matrix.xlsx"):
@@ -1919,22 +1945,30 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/training-topics/"):
                 db.execute("UPDATE training_topics SET priority_id=?,recommendation_id=?,title=?,need_text=?,target_audience=?,priority_level=?,comment=?,updated_at=? WHERE id=?",(data.get("priorityId") or None,data.get("recommendationId") or None,data["title"],data.get("needText") or None,data.get("targetAudience") or None,data.get("priorityLevel","Non définie"),data.get("comment") or None,now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
-                tid=path.split("/")[3]; used=db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone()
-                if used:
+                tid=path.split("/")[3]; guard_structural_edit(db,tid,"edit")
+                tpl_status=db.execute("SELECT status FROM templates WHERE id=?",(tid,)).fetchone()["status"]
+                used=db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone()
+                if used and tpl_status != "session_locked":
                     tid=clone_template(db,tid); data["versionCreated"]=True
                 old=template_payload(db,tid); scale=data.get("scale",old["scale"]); db.execute("UPDATE templates SET name=?,description=?,scale_json=?,priority_json=?,updated_at=? WHERE id=?",(data.get("name",old["name"]),data.get("description",old["description"]),json.dumps(scale),json.dumps(data.get("priority",old["priority"])),now(),tid)); db.commit(); return self.json(200,{"id":tid,"versionCreated":data.get("versionCreated",False)})
             if path.startswith("/api/domains/"):
-                did=path.split("/")[3]; db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",(data["label"],data.get("description",""),int(data.get("displayOrder",1)),int(data.get("active",True)),did)); db.commit(); return self.json(200,{"ok":True})
+                did=path.split("/")[3]
+                owner_domain=db.execute("SELECT template_id FROM domains WHERE id=?",(did,)).fetchone()
+                if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"edit")
+                db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",(data["label"],data.get("description",""),int(data.get("displayOrder",1)),int(data.get("active",True)),did)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]
                 if not (data.get("code") or "").strip(): return self.json(400,{"error":"La référence est obligatoire."})
                 if not (data.get("label") or "").strip(): return self.json(400,{"error":"La question est obligatoire."})
+                owner_domain=db.execute("SELECT d.template_id FROM indicators i JOIN domains d ON d.id=i.domain_id WHERE i.id=?",(iid,)).fetchone()
+                if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"edit")
                 db.execute("UPDATE indicators SET domain_id=?,code=?,label=?,description=?,response_type=?,required=?,display_order=?,active=?,configuration_json=? WHERE id=?",(data["domainId"],data["code"],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder",1)),int(data.get("active",True)),json.dumps(data.get("configuration",{})),iid)); db.commit(); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
+        except StructuralEditForbiddenError as e: return self.json(409, {"error": str(e)})
         except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
@@ -1957,8 +1991,7 @@ class Handler(SimpleHTTPRequestHandler):
                 db.execute("DELETE FROM training_topics WHERE id=?",(path.split("/")[3],)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
                 tid=path.split("/")[3]
-                protected=db.execute("SELECT name FROM templates WHERE id=?",(tid,)).fetchone()
-                if protected and protected["name"] == "EPC / SENEVAL": return self.json(409,{"error":"Suppression impossible. EPC/SENEVAL est le modèle de référence ; dupliquez-le pour le modifier."})
+                guard_structural_edit(db,tid,"delete_template")
                 if db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone():
                     if parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1": db.execute("UPDATE templates SET status='archived',updated_at=? WHERE id=?",(now(),tid)); db.commit(); return self.json(200,{"ok":True,"archived":True})
                     return self.json(409,{"error":"Suppression impossible. Ce questionnaire est utilisé par une ou plusieurs sessions d’atelier. Vous pouvez le conserver, créer une nouvelle version, ou confirmer son retrait de la liste des modèles."})
@@ -1984,9 +2017,7 @@ class Handler(SimpleHTTPRequestHandler):
                 parts=path.split("/"); db.execute("DELETE FROM priorities WHERE session_id=? AND indicator_id=?",(parts[3],parts[5])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and len(path.rstrip("/").split("/")) == 4:
                 sid=path.rstrip("/").split("/")[3]
-                for table in ("training_topics","workshop_recommendations","analysis_entries","priority_analyses","analysis_notes","recommendations","responses","priorities","participants","session_report_meta"):
-                    db.execute(f"DELETE FROM {table} WHERE session_id=?",(sid,))
-                db.execute("DELETE FROM sessions WHERE id=?",(sid,)); db.commit(); return self.json(200,{"ok":True})
+                delete_session(db,sid); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})

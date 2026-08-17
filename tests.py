@@ -212,4 +212,103 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(indicator['responses'], 4)
         self.assertEqual(indicator['capacity'], 90)
 
+    # --- Régression : cycle de vie des questionnaires (correctif 2026-08-17) ---
+
+    def test_canonical_edit_and_delete_are_refused(self):
+        t = self.db.execute('select id from templates').fetchone()['id']
+        with self.assertRaises(app.StructuralEditForbiddenError):
+            app.guard_structural_edit(self.db, t, "edit")
+        with self.assertRaises(app.StructuralEditForbiddenError):
+            app.guard_structural_edit(self.db, t, "delete_template")
+        fork = app.clone_template(self.db, t, status="session_locked")
+        app.guard_structural_edit(self.db, fork, "edit")  # must not raise
+        app.guard_structural_edit(self.db, fork, "delete_template")  # must not raise
+
+    def test_editing_own_private_fork_does_not_clone(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        sid = 'mission-edit'
+        self._mk_session(sid, template=t)
+        self._mk_participant(sid, 'p1')
+        app.ensure_private_template(db, sid)
+        tid = db.execute('select template_id from sessions where id=?', (sid,)).fetchone()['template_id']
+        before = db.execute('select count(*) from templates').fetchone()[0]
+        used = db.execute('select 1 from sessions where template_id=? limit 1', (tid,)).fetchone()
+        status = db.execute('select status from templates where id=?', (tid,)).fetchone()['status']
+        self.assertTrue(used)
+        self.assertEqual(status, 'session_locked')
+        # the fix: used-but-already-private must NOT trigger clone-on-write
+        should_clone = bool(used) and status != 'session_locked'
+        self.assertFalse(should_clone)
+        after = db.execute('select count(*) from templates').fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_delete_session_drops_exclusive_private_fork_but_keeps_canonical_and_shared(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        canonical_id = t['id']
+        sid_a, sid_b = 'mission-del-a', 'mission-del-b'
+        self._mk_session(sid_a, template=t); self._mk_session(sid_b, template=t)
+        self._mk_participant(sid_a, 'pa'); self._mk_participant(sid_b, 'pb')
+        app.ensure_private_template(db, sid_a); app.ensure_private_template(db, sid_b)
+        tid_a = db.execute('select template_id from sessions where id=?', (sid_a,)).fetchone()['template_id']
+        tid_b = db.execute('select template_id from sessions where id=?', (sid_b,)).fetchone()['template_id']
+        self.assertNotEqual(tid_a, tid_b)
+
+        dropped = app.delete_session(db, sid_a)
+        self.assertTrue(dropped)
+        self.assertIsNone(db.execute('select id from sessions where id=?', (sid_a,)).fetchone())
+        self.assertIsNone(db.execute('select id from templates where id=?', (tid_a,)).fetchone())
+        # mission B and the canonical are both untouched
+        self.assertIsNotNone(db.execute('select id from sessions where id=?', (sid_b,)).fetchone())
+        self.assertIsNotNone(db.execute('select id from templates where id=?', (tid_b,)).fetchone())
+        canonical_payload = app.template_payload(db, canonical_id)
+        self.assertEqual(len(canonical_payload['domains']), 7)
+        self.assertEqual(sum(len(d['indicators']) for d in canonical_payload['domains']), 70)
+
+        # mission B's own private fork is dropped in turn; the canonical (never
+        # referenced by A or B once they forked) stays intact throughout
+        dropped_b = app.delete_session(db, sid_b)
+        self.assertTrue(dropped_b)
+        self.assertIsNotNone(db.execute('select id from templates where id=?', (canonical_id,)).fetchone())
+
+    def test_delete_session_never_drops_the_canonical_even_if_still_directly_referenced(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        canonical_id = t['id']
+        sid = 'mission-no-fork-yet'
+        self._mk_session(sid, template=t)  # no participant yet: still points straight at canonical
+        dropped = app.delete_session(db, sid)
+        self.assertFalse(dropped)
+        self.assertIsNotNone(db.execute('select id from templates where id=?', (canonical_id,)).fetchone())
+        canonical_payload = app.template_payload(db, canonical_id)
+        self.assertEqual(len(canonical_payload['domains']), 7)
+        self.assertEqual(sum(len(d['indicators']) for d in canonical_payload['domains']), 70)
+
+    def test_delete_session_never_drops_a_template_still_used_by_another_session(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        fork = app.clone_template(db, t['id'], status='session_locked')
+        db.commit()
+        sid_a, sid_b = 'mission-shared-a', 'mission-shared-b'
+        self._mk_session(sid_a, template={'id': fork, 'version': 1})
+        self._mk_session(sid_b, template={'id': fork, 'version': 1})
+
+        dropped = app.delete_session(db, sid_a)
+        self.assertFalse(dropped)
+        self.assertIsNotNone(db.execute('select id from templates where id=?', (fork,)).fetchone())
+        self.assertIsNotNone(db.execute('select id from sessions where id=?', (sid_b,)).fetchone())
+
+    def test_delete_session_never_drops_an_active_library_template(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        library = app.clone_template(db, t['id'], status='active')
+        db.commit()
+        sid = 'mission-library'
+        self._mk_session(sid, template={'id': library, 'version': 1})
+
+        dropped = app.delete_session(db, sid)
+        self.assertFalse(dropped)
+        self.assertIsNotNone(db.execute('select id from templates where id=?', (library,)).fetchone())
+
 if __name__=='__main__': unittest.main()
