@@ -428,7 +428,12 @@ def connect(path: Path = DATABASE) -> sqlite3.Connection:
     return db
 
 
-def init_db(db: sqlite3.Connection) -> None:
+def init_schema(db: sqlite3.Connection) -> None:
+    """Create/upgrade the schema only: cheap and safe to call on every request
+    (called from Handler.db()). Never runs the heavy, potentially destructive
+    reference-questionnaire migration, nor the retroactive template-forking
+    pass — those only ever run once, from init_db(), at real process startup.
+    """
     db.executescript("""
     CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, version INTEGER NOT NULL, description TEXT, status TEXT NOT NULL, scale_json TEXT NOT NULL, scoring_json TEXT NOT NULL, consensus_json TEXT NOT NULL, grading_json TEXT NOT NULL, priority_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(name, version));
     CREATE TABLE IF NOT EXISTS domains (id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES templates(id), code TEXT NOT NULL, label TEXT NOT NULL, description TEXT, display_order INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
@@ -462,25 +467,49 @@ def init_db(db: sqlite3.Connection) -> None:
     template_columns = {r["name"] for r in db.execute("PRAGMA table_info(templates)")}
     if "owner_user_id" not in template_columns:
         db.execute("ALTER TABLE templates ADD COLUMN owner_user_id TEXT")
+    if "is_canonical" not in template_columns:
+        db.execute("ALTER TABLE templates ADD COLUMN is_canonical INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+        if db.execute("SELECT 1 FROM templates WHERE is_canonical=1").fetchone() is None:
+            # One-time bootstrap for databases created before is_canonical existed: pick the
+            # oldest ('EPC / SENEVAL', lowest version) row as canonical. clone_template always
+            # assigns version = MAX+1, so the true, never-forked original is guaranteed to hold
+            # the lowest version number for that name — the one deliberate, one-off use of name
+            # matching, needed only to bootstrap the stable id-based flag itself.
+            legacy = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version ASC LIMIT 1").fetchone()
+            if legacy:
+                db.execute("UPDATE templates SET is_canonical=1 WHERE id=?", (legacy["id"],))
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
+
+
+def init_db(db: sqlite3.Connection) -> None:
+    """Full startup sequence: schema + one-time/heavy migrations. Call this ONCE, from
+    main(), before the HTTP server starts accepting requests — never from the per-request
+    Handler.db() (use init_schema there instead)."""
+    init_schema(db)
+    ensure_private_templates_for_started_sessions(db)
     migrate_reference_questionnaire(db)
     migrate_ownership(db)
 
 
 def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
-    """Keep the "EPC / SENEVAL" reference template aligned with EPC_DOMAINS.
+    """Keep the canonical EPC/SENEVAL reference template aligned with EPC_DOMAINS.
 
-    Runs on every startup but only acts when the stored domains/indicators
-    differ from EPC_DOMAINS (idempotent). A backup of the database is taken
-    before any destructive change, since existing workshops built on the old
-    (incorrect) reference content lose their per-question responses here —
-    an explicit, user-confirmed trade-off (see consignes_claude.txt point 5).
+    Runs once at real process startup only (see init_db()), and only acts when the
+    stored domains/indicators of the canonical row (identified by the stable
+    is_canonical flag, never by name — a mission's private fork or a duplicate can
+    share the exact same name without ever being mistaken for the reference) differ
+    from EPC_DOMAINS (idempotent). A backup of the database is taken before any
+    destructive change. By the time this runs, every session that had already started
+    collecting has been forked onto its own private template (see
+    ensure_private_templates_for_started_sessions, called first in init_db()), so this
+    can only ever affect the canonical row itself — never a mission's historical data.
     """
     target_codes = [code for code, _, _ in EPC_DOMAINS]
     target_counts = {code: len(indicators) for code, _, indicators in EPC_DOMAINS}
-    tpl = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version DESC LIMIT 1").fetchone()
+    tpl = db.execute("SELECT id FROM templates WHERE is_canonical=1").fetchone()
     if not tpl:
         return
     tid = tpl["id"]
@@ -603,7 +632,7 @@ def seed_epc(db: sqlite3.Connection) -> str:
     scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None, 1))
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
         did = str(uuid.uuid4())
         db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
@@ -642,17 +671,102 @@ def next_order(db, table, where_col, where_value):
     return (db.execute(f"SELECT COALESCE(MAX(display_order),0)+1 FROM {table} WHERE {where_col}=?", (where_value,)).fetchone()[0])
 
 
-def clone_template(db, template_id, name=None):
+def clone_template_with_mapping(db, template_id, name=None, status="active"):
+    """Same as clone_template, but also returns the old->new id maps for domains and
+    indicators, so a caller can re-point a single session's own historical rows
+    (responses/priorities/...) onto the fresh copy without touching any other session
+    that still legitimately points at the original ids."""
     old = template_payload(db, template_id)
     if not old: raise ValueError("Configuration introuvable")
     tid, stamp = str(uuid.uuid4()), now()
     version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?", (name or old["name"],)).fetchone()[0]
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], status, json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id"), 0))
+    domain_map, indicator_map = {}, {}
     for d in old["domains"]:
-        did=str(uuid.uuid4()); db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,d["code"],d["label"],d["description"],d["display_order"],d["active"]))
+        new_did = str(uuid.uuid4()); domain_map[d["id"]] = new_did
+        db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(new_did,tid,d["code"],d["label"],d["description"],d["display_order"],d["active"]))
         for i in d["indicators"]:
-            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),did,i["code"],i["label"],i["description"],i["response_type"],i["required"],i["display_order"],i["active"],json.dumps(i["configuration"])))
-    db.commit(); return tid
+            new_iid = str(uuid.uuid4()); indicator_map[i["id"]] = new_iid
+            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(new_iid,new_did,i["code"],i["label"],i["description"],i["response_type"],i["required"],i["display_order"],i["active"],json.dumps(i["configuration"])))
+    db.commit()
+    return tid, domain_map, indicator_map
+
+
+def clone_template(db, template_id, name=None, status="active"):
+    tid, _, _ = clone_template_with_mapping(db, template_id, name=name, status=status)
+    return tid
+
+
+def is_canonical_template(db, template_id) -> bool:
+    row = db.execute("SELECT is_canonical FROM templates WHERE id=?", (template_id,)).fetchone()
+    return bool(row and row["is_canonical"])
+
+
+class StructuralEditForbiddenError(Exception):
+    """Raised when an add/delete on domains/indicators targets the canonical EPC/SENEVAL
+    reference template — never raised for a mission's private fork or a user's own custom
+    questionnaire, which remain freely editable."""
+
+
+CANONICAL_STRUCTURE_MESSAGES = {
+    "add": "Ajout impossible : EPC / SENEVAL est le questionnaire de référence et doit garder exactement sa structure validée (7 domaines / 70 indicateurs, dans l'ordre validé). Dupliquez-le pour créer votre propre questionnaire modifiable.",
+    "delete": "Suppression impossible : EPC / SENEVAL est le questionnaire de référence et doit garder exactement sa structure validée (7 domaines / 70 indicateurs, dans l'ordre validé). Dupliquez-le pour créer votre propre questionnaire modifiable.",
+}
+
+
+def guard_structural_edit(db, template_id, action="add") -> None:
+    if is_canonical_template(db, template_id):
+        raise StructuralEditForbiddenError(CANONICAL_STRUCTURE_MESSAGES[action])
+
+
+def ensure_private_template(db: sqlite3.Connection, session_id: str):
+    """Fork this session's questionnaire onto a private, session-exclusive copy the
+    moment it needs one — either because its very first participant is being created,
+    or during the one-time retroactive pass for missions that already started collecting
+    before this fix existed — and re-point this session's OWN historical rows
+    (responses/priorities/analysis_notes/recommendations) onto the fresh copy's new ids,
+    so its past answers keep resolving against the exact domains/indicators it actually
+    used. No other session's rows are ever touched.
+
+    "Still shared" vs "already private" is decided purely by a stable, race-free signal —
+    never by name/text matching, and never by counting how many sessions currently share
+    the template (a session that happens to be the only current user of a still-"active"
+    pool template — canonical or a custom one — is NOT yet safe: another mission could
+    start using that same template_id later and would then be free to edit it). The only
+    templates ever marked status='session_locked' are ones already forked exclusively for
+    one session by this very function, so that flag alone is a reliable, order-independent
+    "already private" signal. Idempotent and cheap to call on every relevant request.
+    """
+    row = db.execute("SELECT template_id, owner_user_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if not row:
+        return None
+    tid = row["template_id"]
+    current = db.execute("SELECT status FROM templates WHERE id=?", (tid,)).fetchone()
+    if current and current["status"] == "session_locked":
+        return tid
+    new_tid, domain_map, indicator_map = clone_template_with_mapping(db, tid, status="session_locked")
+    db.execute("UPDATE templates SET owner_user_id=? WHERE id=?", (row["owner_user_id"], new_tid))
+    for old_iid, new_iid in indicator_map.items():
+        db.execute("UPDATE responses SET indicator_id=? WHERE session_id=? AND indicator_id=?", (new_iid, session_id, old_iid))
+        db.execute("UPDATE analysis_notes SET indicator_id=? WHERE session_id=? AND indicator_id=?", (new_iid, session_id, old_iid))
+        db.execute("UPDATE recommendations SET indicator_id=? WHERE session_id=? AND indicator_id=?", (new_iid, session_id, old_iid))
+        db.execute("UPDATE priorities SET indicator_id=? WHERE session_id=? AND indicator_id=?", (new_iid, session_id, old_iid))
+    for old_did, new_did in domain_map.items():
+        db.execute("UPDATE priorities SET domain_id=? WHERE session_id=? AND domain_id=?", (new_did, session_id, old_did))
+    new_version = db.execute("SELECT version FROM templates WHERE id=?", (new_tid,)).fetchone()["version"]
+    db.execute("UPDATE sessions SET template_id=?,template_version=? WHERE id=?", (new_tid, new_version, session_id))
+    db.commit()
+    return new_tid
+
+
+def ensure_private_templates_for_started_sessions(db: sqlite3.Connection) -> None:
+    """One-time (idempotent) retroactive pass: fork the questionnaire for every session
+    that already has at least one participant, so missions whose collecte began before
+    this fix was deployed — including any mission with real validated responses/
+    priorities/analyses recorded — get protected the moment this fix ships. Safe to
+    re-run: a no-op for sessions already on an exclusive template."""
+    for s in rows(db, "SELECT DISTINCT session_id AS id FROM participants"):
+        ensure_private_template(db, s["id"])
 
 
 def create_blank_template(db, data, owner_user_id=None):
@@ -660,7 +774,7 @@ def create_blank_template(db, data, owner_user_id=None):
     if not name: raise ValueError("Le nom est obligatoire")
     version=db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?",(name,)).fetchone()[0]
     scale={"type":"numeric","min":1,"max":5,"labels":{}}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id)); db.commit(); return tid
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id,0)); db.commit(); return tid
 
 
 def matrix_xlsx(template):
@@ -1147,7 +1261,8 @@ def report_docx(db, sid):
     doc = Document()
 
     docx_style_heading(doc.add_heading("Diagnostic terminé", level=0))
-    docx_note(doc, f"{session['name']} · {a['participantCount']} participants · {a['completedCount']} validés · taux {round(a['completedCount']/a['participantCount']*100) if a['participantCount'] else 0}%", size=11, italic=False)
+    progress_target = session["expected_participants"] or a["participantCount"]
+    docx_note(doc, f"{session['name']} · {a['participantCount']} commencés · {a['completedCount']} validés · progression {round(a['completedCount']/progress_target*100) if progress_target else 0}%", size=11, italic=False)
     doc.add_paragraph()
     docx_metrics_row(doc, [
         ("Capacité", pdf_fmt(g["capacity"])),
@@ -1338,6 +1453,11 @@ def grade(value, norm):
 
 
 def analysis(db, session_id: str):
+    """Capacité/consensus are computed only from participants with status='completed'
+    (a questionnaire opened but abandoned mid-way must never silently shift the
+    published score) — participantCount below still counts every participant row
+    (started or completed) so "commencés" stays visible separately from
+    "validés"/completedCount."""
     session = db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     if not session:
         return None
@@ -1350,7 +1470,7 @@ def analysis(db, session_id: str):
         indicators = [i for i in domain["indicators"] if i["active"]]
         output_indicators, participant_means = [], {}
         for indicator in indicators:
-            response_rows = rows(db, "SELECT participant_id,value_json FROM responses WHERE session_id=? AND indicator_id=?", (session_id, indicator["id"]))
+            response_rows = rows(db, "SELECT r.participant_id,r.value_json FROM responses r JOIN participants p ON p.id=r.participant_id WHERE r.session_id=? AND r.indicator_id=? AND p.status='completed'", (session_id, indicator["id"]))
             values = [float(json.loads(r["value_json"])) for r in response_rows if isinstance(json.loads(r["value_json"]), (int, float))]
             for r in response_rows:
                 value = json.loads(r["value_json"])
@@ -1407,7 +1527,7 @@ def report_data(db, session_id: str):
 
 class Handler(SimpleHTTPRequestHandler):
     def db(self):
-        db = connect(); init_db(db); return db
+        db = connect(); init_schema(db); return db
 
     def json(self, code, payload, cookie=None):
         raw = json.dumps(payload, ensure_ascii=False).encode()
@@ -1507,6 +1627,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.serve_static(path)
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
+        except Exception: return self.json(500, {"error": "Erreur interne inattendue : le fichier n'a pas pu être généré. Réessayez ou contactez le support."})
         finally: db.close()
 
     def do_POST(self):
@@ -1706,9 +1827,13 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/templates/") and path.endswith("/clone"):
                 return self.json(201,{"id":clone_template(db,path.split("/")[3],data.get("name"))})
             if path.startswith("/api/templates/") and path.endswith("/domains"):
-                tid=path.split("/")[3]; did=str(uuid.uuid4()); code=data.get("code") or "domain-"+uuid.uuid4().hex[:8]; db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,code,data["label"],data.get("description",""),int(data.get("displayOrder") or next_order(db,"domains","template_id",tid)),int(data.get("active",True)))); db.commit(); return self.json(201,{"id":did})
+                tid=path.split("/")[3]; guard_structural_edit(db,tid,"add")
+                did=str(uuid.uuid4()); code=data.get("code") or "domain-"+uuid.uuid4().hex[:8]; db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,code,data["label"],data.get("description",""),int(data.get("displayOrder") or next_order(db,"domains","template_id",tid)),int(data.get("active",True)))); db.commit(); return self.json(201,{"id":did})
             if path.startswith("/api/domains/") and path.endswith("/indicators"):
-                did=path.split("/")[3]; iid=str(uuid.uuid4()); db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(iid,did,data.get("code") or "indicator-"+uuid.uuid4().hex[:8],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder") or next_order(db,"indicators","domain_id",did)),int(data.get("active",True)),json.dumps(data.get("configuration",{})))); db.commit(); return self.json(201,{"id":iid})
+                did=path.split("/")[3]
+                owner_domain=db.execute("SELECT template_id FROM domains WHERE id=?",(did,)).fetchone()
+                if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"add")
+                iid=str(uuid.uuid4()); db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(iid,did,data.get("code") or "indicator-"+uuid.uuid4().hex[:8],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder") or next_order(db,"indicators","domain_id",did)),int(data.get("active",True)),json.dumps(data.get("configuration",{})))); db.commit(); return self.json(201,{"id":iid})
             if path == "/api/sessions":
                 template = template_payload(db, data["templateId"])
                 if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]): return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
@@ -1716,6 +1841,7 @@ class Handler(SimpleHTTPRequestHandler):
             if path.endswith("/participants"):
                 sid = path.split("/")[3]; session = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
                 if not session or session["status"] != "open": return self.json(409, {"error": "Collecte fermée"})
+                ensure_private_template(db, sid)
                 pid, label = str(uuid.uuid4()), data.get("anonymousId") or f"P-{uuid.uuid4().hex[:6]}"; db.execute("INSERT INTO participants VALUES (?,?,?,?,?,?,?)", (pid, sid, label, "in_progress", now(), None, data.get("displayName") or None)); db.commit(); return self.json(201, {"id": pid, "anonymousId": label})
             if path.endswith("/responses"):
                 sid = path.split("/")[3]; stamp = now(); db.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(participant_id,indicator_id) DO UPDATE SET value_json=excluded.value_json,value_type=excluded.value_type,updated_at=excluded.updated_at", (str(uuid.uuid4()), sid, data["participantId"], data["indicatorId"], json.dumps(data["value"]), data.get("valueType", "numeric"), stamp, stamp)); db.commit(); return self.json(200, {"ok": True})
@@ -1748,6 +1874,7 @@ class Handler(SimpleHTTPRequestHandler):
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
+        except StructuralEditForbiddenError as e: return self.json(409, {"error": str(e)})
         except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
@@ -1838,6 +1965,8 @@ class Handler(SimpleHTTPRequestHandler):
                 db.execute("DELETE FROM indicators WHERE domain_id IN (SELECT id FROM domains WHERE template_id=?)",(tid,)); db.execute("DELETE FROM domains WHERE template_id=?",(tid,)); db.execute("DELETE FROM templates WHERE id=?",(tid,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/domains/"):
                 did=path.split("/")[3]
+                owner_domain=db.execute("SELECT template_id FROM domains WHERE id=?",(did,)).fetchone()
+                if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"delete")
                 affected=rows(db,"SELECT DISTINCT s.id,s.name FROM sessions s JOIN responses r ON r.session_id=s.id JOIN indicators i ON i.id=r.indicator_id WHERE i.domain_id=?",(did,))
                 if affected:
                     names=", ".join(a["name"] for a in affected)
@@ -1845,6 +1974,8 @@ class Handler(SimpleHTTPRequestHandler):
                 db.execute("DELETE FROM indicators WHERE domain_id=?",(did,)); db.execute("DELETE FROM domains WHERE id=?",(did,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]
+                owner_domain=db.execute("SELECT d.template_id FROM indicators i JOIN domains d ON d.id=i.domain_id WHERE i.id=?",(iid,)).fetchone()
+                if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"delete")
                 used=db.execute("SELECT COUNT(*) FROM responses WHERE indicator_id=?",(iid,)).fetchone()[0]
                 if used:
                     return self.json(409,{"error":f"Suppression impossible : {used} réponse(s) sont déjà enregistrées pour cette question. Désactivez-la plutôt pour préserver l'historique.","dependencies":used})
@@ -1861,6 +1992,7 @@ class Handler(SimpleHTTPRequestHandler):
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
+        except StructuralEditForbiddenError as e: return self.json(409, {"error": str(e)})
         except Exception: return self.json(500, {"error": "Erreur interne inattendue. Aucune donnée n'a été modifiée."})
         finally: db.close()
 
