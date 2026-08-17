@@ -353,11 +353,34 @@ async function finish(){
   try{localStorage.setItem(participantKey(ctx.sid),JSON.stringify({pid:ctx.pid,completed:true,anonymous:participantAnonymous}))}catch(_){}
   participantDoneScreen(ctx.sid,ctx.pid);
 }
-function participantDoneScreen(sid,pid){app.innerHTML=`<section class="card participant-done"><h2>Merci pour votre participation</h2><p>Votre questionnaire a bien été transmis au modérateur. Vous pouvez fermer cette page.</p>${sid&&pid?`<button class="secondary" onclick="myResponsesView('${sid}','${pid}')">Télécharger une copie de mes réponses</button>`:''}</section>`}
-async function myResponsesView(sid,pid){
-  let d=await api('/api/participant?session='+sid+'&participant='+pid),t=d.template,s=d.session,r=d.responses||{},labels=(t.scale&&t.scale.labels)||{};
+function participantDoneScreen(sid,pid){app.innerHTML=`<section class="card participant-done"><h2>Merci pour votre participation</h2><p>Votre questionnaire a bien été transmis au modérateur. Vous pouvez fermer cette page.</p>${sid&&pid?`<button class="secondary" onclick="downloadMyResponses('${sid}','${pid}')">Télécharger une copie de mes réponses</button> <button class="ghost" onclick="myResponsesView('${sid}','${pid}')">Afficher mes réponses à l'écran</button>`:''}</section>`}
+async function fetchParticipantReport(sid,pid){
+  let d=await api('/api/participant?session='+sid+'&participant='+pid);
+  if(!d||!d.session||!d.template) throw Error('Vos réponses ne sont plus disponibles : cet atelier a été clôturé ou supprimé.');
+  return d;
+}
+// Ne jamais lire d.participant ici : /api/participant renvoie display_name/anonymous_id,
+// mais cette copie doit rester anonyme, comme l'écran l'a toujours été.
+function participantReportBody(d){
+  let t=d.template,s=d.session,r=d.responses||{},labels=(t.scale&&t.scale.labels)||{};
   let ds=t.domains.map(dm=>({...dm,indicators:dm.indicators.filter(i=>i.active)})).filter(dm=>dm.indicators.length);
-  app.innerHTML=`<article class="report"><div class="report-actions"><button class="secondary" onclick="participantDoneScreen('${sid}','${pid}')">← Retour</button><button onclick="window.print()">Imprimer / Enregistrer en PDF</button></div><section class="report-cover"><h1>Mes réponses</h1><h2>${esc(s.name)}</h2><p>${esc(s.date||'Date non renseignée')}</p></section>${ds.map(dm=>`<section><h2>${esc(dm.label)}</h2>${dm.indicators.map((i,n)=>{let v=r[i.id];let display=v==null||v===''?'Sans réponse':(i.response_type==='numeric'?`${esc(v)} — ${esc(labels[v]||'')}`:esc(v));return `<p><b>${n+1}. ${esc(i.label)}</b><br>${display}</p>`}).join('')}</section>`).join('')}</article>`
+  return `<section class="report-cover"><h1>Mes réponses</h1><h2>${esc(s.name)}</h2><p>${esc(s.date||'Date non renseignée')}</p></section>${ds.map(dm=>`<section><h2>${esc(dm.label)}</h2>${dm.indicators.map((i,n)=>{let v=r[i.id];let display=v==null||v===''?'Sans réponse':(i.response_type==='numeric'?`${esc(v)} — ${esc(labels[v]||'')}`:esc(v));return `<p><b>${n+1}. ${esc(i.label)}</b><br>${display}</p>`}).join('')}</section>`).join('')}`
+}
+async function myResponsesView(sid,pid){
+  let d;
+  try{ d=await fetchParticipantReport(sid,pid) }catch(e){ return notice(e.message) }
+  app.innerHTML=`<article class="report"><div class="report-actions"><button class="secondary" onclick="participantDoneScreen('${sid}','${pid}')">← Retour</button><button class="secondary" onclick="downloadMyResponses('${sid}','${pid}')">Télécharger (fichier)</button><button onclick="window.print()">Imprimer / Enregistrer en PDF</button></div>${participantReportBody(d)}</article>`
+}
+async function downloadMyResponses(sid,pid){
+  let d;
+  try{ d=await fetchParticipantReport(sid,pid) }catch(e){ return notice(e.message) }
+  let html=`<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Mes réponses — ${esc(d.session.name)}</title><style>body{font-family:sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;color:#111}h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.6rem}p{margin:.3rem 0}</style></head><body>${participantReportBody(d)}</body></html>`;
+  try{
+    let blob=new Blob([html],{type:'text/html;charset=utf-8'});
+    let url=URL.createObjectURL(blob);
+    let a=document.createElement('a');a.href=url;a.download='mes-reponses_'+fileSlug(d.session.name)+'_'+dateStamp()+'.html';document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(e){ return notice('Le téléchargement n’a pas pu être généré. Veuillez réessayer.') }
 }
 async function authGate(){
   document.querySelector('.app-shell').classList.remove('participant-mode');
