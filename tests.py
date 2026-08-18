@@ -14,7 +14,7 @@ class EngineTests(unittest.TestCase):
         self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],name,'','','', 'open',app.now(),None,'',None,None))
         self.db.commit()
     def _mk_participant(self,sid,pid,status='in_progress'):
-        self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,pid,status,app.now(),app.now() if status=='completed' else None,None))
+        self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',(pid,sid,pid,status,app.now(),app.now() if status=='completed' else None,None))
         self.db.commit()
     def test_epc_seed_has_seven_domains_and_seventy_indicators(self):
         t=self.db.execute('select id from templates').fetchone()['id']; payload=app.template_payload(self.db,t)
@@ -23,13 +23,13 @@ class EngineTests(unittest.TestCase):
         t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         for n,v in [('a',1),('b',5)]:
-            pid=n; self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,n,'completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,inds,str(v),'numeric',app.now(),app.now()))
+            pid=n; self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',(pid,sid,n,'completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,inds,str(v),'numeric',app.now(),app.now()))
         self.db.commit(); out=app.analysis(self.db,sid); indicator=out['domains'][0]['indicators'][0]
         self.assertEqual(indicator['responses'],2); self.assertEqual(indicator['capacity'],60); self.assertEqual(indicator['consensus'],0); self.assertEqual(app.grade(63,app.GRADING),40)
     def test_single_respondent_consensus_is_not_calculable(self):
         t=self.db.execute('select id,version from templates').fetchone(); sid='solo-session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
-        self.db.execute('insert into participants values(?,?,?,?,?,?,?)',('solo',sid,'solo','completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,'solo',inds,'4','numeric',app.now(),app.now()))
+        self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',('solo',sid,'solo','completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,'solo',inds,'4','numeric',app.now(),app.now()))
         self.db.commit(); out=app.analysis(self.db,sid); indicator=out['domains'][0]['indicators'][0]; domain_out=out['domains'][0]
         self.assertIsNotNone(indicator['capacity']); self.assertIsNone(indicator['consensus']); self.assertEqual(indicator['consensusNote'],'single_respondent')
         self.assertIsNone(domain_out['consensus']); self.assertEqual(domain_out['consensusNote'],'single_respondent')
@@ -310,5 +310,72 @@ class EngineTests(unittest.TestCase):
         dropped = app.delete_session(db, sid)
         self.assertFalse(dropped)
         self.assertIsNotNone(db.execute('select id from templates where id=?', (library,)).fetchone())
+
+    def test_analysis_computes_graded_values_per_indicator(self):
+        t=self.db.execute('select id,version from templates').fetchone(); sid='session-graded'
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        for n,v in [('a',1),('b',5)]:
+            self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',(n,sid,n,'completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,n,inds,str(v),'numeric',app.now(),app.now()))
+        self.db.commit(); out=app.analysis(self.db,sid); indicator=out['domains'][0]['indicators'][0]
+        self.assertEqual(indicator['gradedCapacity'],app.grade(indicator['capacity'],app.GRADING))
+        self.assertEqual(indicator['gradedConsensus'],app.grade(indicator['consensus'],app.GRADING))
+
+    def test_individual_responses_rows_scoped_and_anonymous_safe(self):
+        db=self.db
+        t=db.execute('select id,version from templates').fetchone()
+        sid_a,sid_b='ind-resp-a','ind-resp-b'
+        self._mk_session(sid_a,template=t); self._mk_session(sid_b,template=t)
+        domain=db.execute('select id from domains where template_id=? order by display_order limit 1',(t['id'],)).fetchone()['id']
+        ind=db.execute('select id,code from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()
+        db.execute("insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name,anonymous,participant_type,profile,sex,age_range,education_level) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   ('p-anon',sid_a,'P-1','completed',app.now(),app.now(),'Nom Caché',1,'Individuel','ONG','Homme','25–39 ans','BAC'))
+        db.execute("insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name,anonymous,participant_type,profile,sex,age_range,education_level) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   ('p-named',sid_a,'P-2','completed',app.now(),app.now(),'Mme Diop',0,'Institutionnel','Administration','Femme','40–54 ans','Licence'))
+        db.execute("insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)",
+                   ('p-progress',sid_a,'P-3','in_progress',app.now(),None,None))
+        db.execute("insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)",
+                   ('p-other',sid_b,'P-4','completed',app.now(),app.now(),'Autre mission'))
+        for pid,val in (('p-anon','3'),('p-named','2'),('p-progress','1'),('p-other','4')):
+            db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid_a if pid!='p-other' else sid_b,pid,ind['id'],val,'numeric',app.now(),app.now()))
+        db.commit()
+
+        data=app.individual_responses_rows(db,sid_a)
+        ids=[r['id'] for r in data['rows']]
+        self.assertEqual(sorted(ids),['P-1','P-2'])
+        anon_row=next(r for r in data['rows'] if r['id']=='P-1')
+        named_row=next(r for r in data['rows'] if r['id']=='P-2')
+        self.assertEqual(anon_row['name'],'')
+        self.assertEqual(anon_row['status'],'Anonyme')
+        self.assertEqual(named_row['name'],'Mme Diop')
+        self.assertEqual(named_row['status'],'Nominatif')
+        self.assertEqual(named_row['profile'],'Administration')
+        self.assertEqual(anon_row[ind['id']],3.0)
+        self.assertEqual(named_row[ind['id']],2.0)
+        self.assertEqual([i['id'] for i in data['indicators']][0],ind['id'])
+
+    def test_participants_put_route_is_public(self):
+        self.assertTrue(app.is_public_api('/api/participants/abc-123','PUT'))
+        self.assertFalse(app.is_public_api('/api/participants/abc-123','GET'))
+        self.assertFalse(app.is_public_api('/api/participants/abc-123','DELETE'))
+
+    def test_participant_profile_columns_are_additive_and_nullable(self):
+        cols={r['name']:r for r in self.db.execute('PRAGMA table_info(participants)')}
+        for col in ('anonymous','participant_type','profile','sex','age_range','education_level'):
+            self.assertIn(col,cols)
+            self.assertEqual(cols[col]['notnull'],0)
+        sid='migration-session'; self._mk_session(sid); self._mk_participant(sid,'existing-participant')
+        app.init_schema(self.db)
+        row=self.db.execute('select * from participants where id=?',('existing-participant',)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIsNone(row['anonymous'])
+
+    def test_domain_and_indicator_frozen_messages_mention_duplication(self):
+        self.assertIn('figée',app.DOMAIN_FROZEN_MESSAGE)
+        self.assertIn('dupliquez',app.DOMAIN_FROZEN_MESSAGE.lower())
+        self.assertIn('figée',app.INDICATOR_FROZEN_MESSAGE)
+        self.assertIn('dupliquez',app.INDICATOR_FROZEN_MESSAGE.lower())
+        self.assertIn('{count}',app.DOMAIN_FROZEN_MESSAGE); self.assertIn('{names}',app.DOMAIN_FROZEN_MESSAGE)
+        self.assertIn('{count}',app.INDICATOR_FROZEN_MESSAGE)
 
 if __name__=='__main__': unittest.main()

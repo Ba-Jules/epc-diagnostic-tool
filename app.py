@@ -225,6 +225,8 @@ def is_public_api(path: str, method: str) -> bool:
         return True
     if path.startswith("/api/sessions/") and method == "POST" and (path.endswith("/participants") or path.endswith("/responses") or path.endswith("/complete")):
         return True
+    if path.startswith("/api/participants/") and method == "PUT":
+        return True
     return False
 
 
@@ -460,6 +462,10 @@ def init_schema(db: sqlite3.Connection) -> None:
     if "display_name" not in existing_columns:
         db.execute("ALTER TABLE participants ADD COLUMN display_name TEXT")
         db.commit()
+    for col, decl in (("anonymous", "INTEGER"), ("participant_type", "TEXT"), ("profile", "TEXT"), ("sex", "TEXT"), ("age_range", "TEXT"), ("education_level", "TEXT")):
+        if col not in existing_columns:
+            db.execute(f"ALTER TABLE participants ADD COLUMN {col} {decl}")
+    db.commit()
     session_columns = {r["name"] for r in db.execute("PRAGMA table_info(sessions)")}
     for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER"), ("owner_user_id", "TEXT")):
         if col not in session_columns:
@@ -721,6 +727,10 @@ def guard_structural_edit(db, template_id, action="add") -> None:
         raise StructuralEditForbiddenError(CANONICAL_STRUCTURE_MESSAGES[action])
 
 
+DOMAIN_FROZEN_MESSAGE = "Ce questionnaire contient déjà des réponses dans {count} atelier(s) ({names}). Sa structure est désormais figée afin de préserver la cohérence des données : désactivez ce domaine pour préserver l'historique, ou dupliquez le questionnaire pour créer une nouvelle version modifiable."
+INDICATOR_FROZEN_MESSAGE = "Ce questionnaire contient déjà {count} réponse(s) pour cette question. Sa structure est désormais figée afin de préserver la cohérence des données : désactivez cette question pour préserver l'historique, ou dupliquez le questionnaire pour créer une nouvelle version modifiable."
+
+
 def ensure_private_template(db: sqlite3.Connection, session_id: str):
     """Fork this session's questionnaire onto a private, session-exclusive copy the
     moment it needs one — either because its very first participant is being created,
@@ -823,6 +833,56 @@ def blank_matrix_xlsx():
 
 def report_rows(db, sid):
     a=analysis(db,sid); return a, [[d['label'],d['capacity'],_c(d),d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
+
+def individual_responses_rows(db, session_id: str):
+    """Wide export shape: one row per validated (status='completed') participant of this
+    session only, one column per active indicator. Anonymous participants never expose
+    display_name, regardless of what was stored, so anonymat holds even if the client
+    ever sends a stale name alongside anonymous=1."""
+    session = db.execute("SELECT template_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if not session:
+        return {"indicators": [], "rows": []}
+    template = template_payload(db, session["template_id"])
+    indicators = [i for d in template["domains"] for i in d["indicators"] if i["active"]]
+    participants = rows(db, "SELECT * FROM participants WHERE session_id=? AND status='completed' ORDER BY started_at", (session_id,))
+    out_rows = []
+    for p in participants:
+        anonymous = bool(p["anonymous"])
+        responses = {r["indicator_id"]: json.loads(r["value_json"]) for r in db.execute("SELECT indicator_id,value_json FROM responses WHERE session_id=? AND participant_id=?", (session_id, p["id"]))}
+        row = {"id": p["anonymous_id"], "name": "" if anonymous else (p["display_name"] or ""), "status": "Anonyme" if anonymous else "Nominatif",
+               "participant_type": p["participant_type"] or "", "profile": p["profile"] or "", "sex": p["sex"] or "",
+               "age_range": p["age_range"] or "", "education_level": p["education_level"] or ""}
+        for ind in indicators:
+            row[ind["id"]] = responses.get(ind["id"], "")
+        out_rows.append(row)
+    return {"indicators": indicators, "rows": out_rows}
+
+
+INDIVIDUAL_RESPONSES_HEAD = ["Identifiant participant", "Nom", "Statut", "Type de participant", "Profil", "Sexe", "Tranche d'âge", "Niveau de scolarisation"]
+
+
+def _individual_responses_table(db, session_id: str):
+    data = individual_responses_rows(db, session_id)
+    head = INDIVIDUAL_RESPONSES_HEAD + [i["code"] for i in data["indicators"]]
+    body = [[row["id"], row["name"], row["status"], row["participant_type"], row["profile"], row["sex"], row["age_range"], row["education_level"]] + [row[i["id"]] for i in data["indicators"]] for row in data["rows"]]
+    return head, body
+
+
+def individual_responses_xlsx(db, session_id: str):
+    head, body = _individual_responses_table(db, session_id)
+    out = BytesIO(); wb = xlsxwriter.Workbook(out, {"in_memory": True}); h = wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF"})
+    s = wb.add_worksheet("Réponses individuelles"); s.write_row(0, 0, head, h)
+    for n, row in enumerate(body): s.write_row(n + 1, 0, row)
+    s.set_column(0, len(head) - 1, 20)
+    wb.close(); return out.getvalue()
+
+
+def individual_responses_csv(db, session_id: str):
+    head, body = _individual_responses_table(db, session_id)
+    buf = StringIO(); writer = csv.writer(buf); writer.writerow(head)
+    for row in body: writer.writerow(row)
+    return buf.getvalue().encode()
+
 
 def report_xlsx(db,sid):
     a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})
@@ -1507,7 +1567,7 @@ def analysis(db, session_id: str):
             sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** .5 if len(values) > 1 else None
             capacity = mean / high * output_max if mean is not None else None
             cons = max(0, output_max - consensus["factor"] * (sd / amplitude * output_max)) if sd is not None else None
-            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, len(rows(db, "SELECT id FROM participants WHERE session_id=?", (session_id,))) - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
+            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, len(rows(db, "SELECT id FROM participants WHERE session_id=?", (session_id,))) - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "gradedCapacity": grade(capacity, norm) if capacity is not None else None, "gradedConsensus": grade(cons, norm) if cons is not None else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
             all_values.extend(values)
         person_scores = [sum(values) / len(values) for values in participant_means.values() if values]
         dmean = sum(person_scores) / len(person_scores) if person_scores else None
@@ -1631,6 +1691,8 @@ class Handler(SimpleHTTPRequestHandler):
                 sid=path.split("/")[3];data=report_xlsx(db,sid);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"diagnostic",ext="xlsx")
             elif path.startswith("/api/sessions/") and path.endswith("/report.docx"):
                 sid=path.split("/")[3];data=report_docx(db,sid);mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document';name=export_filename(session_label(db,sid),"rapport",ext="docx")
+            elif path.startswith("/api/sessions/") and path.endswith("/individual-responses.xlsx"):
+                sid=path.split("/")[3];data=individual_responses_xlsx(db,sid);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"reponses-individuelles",ext="xlsx")
             else: data=None
             if data is not None:
                 self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Disposition',f'attachment; filename={name}');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(data);return
@@ -1638,6 +1700,8 @@ class Handler(SimpleHTTPRequestHandler):
                 sid = path.split("/")[3]; buf = StringIO(); writer = csv.writer(buf); writer.writerow(["participant", "nom / organisation", "indicator", "value", "updated_at"])
                 for r in db.execute("SELECT p.anonymous_id,p.display_name,i.code,r.value_json,r.updated_at FROM responses r JOIN participants p ON p.id=r.participant_id JOIN indicators i ON i.id=r.indicator_id WHERE r.session_id=?", (sid,)): writer.writerow(r)
                 data = buf.getvalue().encode(); name=export_filename(session_label(db,sid),"reponses",ext="csv"); self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.end_headers(); self.wfile.write(data); return
+            if path.startswith("/api/sessions/") and path.endswith("/individual-responses.csv"):
+                sid = path.split("/")[3]; data = individual_responses_csv(db, sid); name=export_filename(session_label(db,sid),"reponses-individuelles",ext="csv"); self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/sessions/") and path.endswith("/ai/report-blocks"):
                 sid = path.split("/")[3]
                 return self.json(200, rows(db, "SELECT section_key,content,retained_at FROM report_ai_blocks WHERE session_id=?", (sid,)))
@@ -1868,7 +1932,7 @@ class Handler(SimpleHTTPRequestHandler):
                 sid = path.split("/")[3]; session = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
                 if not session or session["status"] != "open": return self.json(409, {"error": "Collecte fermée"})
                 ensure_private_template(db, sid)
-                pid, label = str(uuid.uuid4()), data.get("anonymousId") or f"P-{uuid.uuid4().hex[:6]}"; db.execute("INSERT INTO participants VALUES (?,?,?,?,?,?,?)", (pid, sid, label, "in_progress", now(), None, data.get("displayName") or None)); db.commit(); return self.json(201, {"id": pid, "anonymousId": label})
+                pid, label = str(uuid.uuid4()), data.get("anonymousId") or f"P-{uuid.uuid4().hex[:6]}"; db.execute("INSERT INTO participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) VALUES (?,?,?,?,?,?,?)", (pid, sid, label, "in_progress", now(), None, data.get("displayName") or None)); db.commit(); return self.json(201, {"id": pid, "anonymousId": label})
             if path.endswith("/responses"):
                 sid = path.split("/")[3]; stamp = now(); db.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(participant_id,indicator_id) DO UPDATE SET value_json=excluded.value_json,value_type=excluded.value_type,updated_at=excluded.updated_at", (str(uuid.uuid4()), sid, data["participantId"], data["indicatorId"], json.dumps(data["value"]), data.get("valueType", "numeric"), stamp, stamp)); db.commit(); return self.json(200, {"ok": True})
             if path.endswith("/complete"):
@@ -1931,7 +1995,17 @@ class Handler(SimpleHTTPRequestHandler):
                     db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,sid))
                 db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/participants/"):
-                pid=path.split("/")[3]; db.execute("UPDATE participants SET display_name=? WHERE id=?",(data.get("displayName") or None,pid)); db.commit(); return self.json(200,{"ok":True})
+                pid=path.split("/")[3]
+                field_map={"displayName":"display_name","anonymous":"anonymous","participantType":"participant_type","profile":"profile","sex":"sex","ageRange":"age_range","educationLevel":"education_level"}
+                sets,vals=[],[]
+                for key,col in field_map.items():
+                    if key in data:
+                        v=data[key]
+                        v=(1 if v else 0) if key=="anonymous" else (v or None)
+                        sets.append(f"{col}=?"); vals.append(v)
+                if sets:
+                    vals.append(pid); db.execute(f"UPDATE participants SET {','.join(sets)} WHERE id=?",vals); db.commit()
+                return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
                 db.execute("UPDATE priority_analyses SET problem=?,updated_at=? WHERE id=?",(data.get("problem",""),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/ai-suggestions/"):
@@ -2003,7 +2077,7 @@ class Handler(SimpleHTTPRequestHandler):
                 affected=rows(db,"SELECT DISTINCT s.id,s.name FROM sessions s JOIN responses r ON r.session_id=s.id JOIN indicators i ON i.id=r.indicator_id WHERE i.domain_id=?",(did,))
                 if affected:
                     names=", ".join(a["name"] for a in affected)
-                    return self.json(409,{"error":f"Suppression impossible : ce domaine contient des réponses dans {len(affected)} atelier(s) ({names}). Désactivez-le plutôt pour préserver l'historique.","sessions":affected})
+                    return self.json(409,{"error":DOMAIN_FROZEN_MESSAGE.format(count=len(affected),names=names),"sessions":affected})
                 db.execute("DELETE FROM indicators WHERE domain_id=?",(did,)); db.execute("DELETE FROM domains WHERE id=?",(did,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]
@@ -2011,7 +2085,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"delete")
                 used=db.execute("SELECT COUNT(*) FROM responses WHERE indicator_id=?",(iid,)).fetchone()[0]
                 if used:
-                    return self.json(409,{"error":f"Suppression impossible : {used} réponse(s) sont déjà enregistrées pour cette question. Désactivez-la plutôt pour préserver l'historique.","dependencies":used})
+                    return self.json(409,{"error":INDICATOR_FROZEN_MESSAGE.format(count=used),"dependencies":used})
                 db.execute("DELETE FROM indicators WHERE id=?",(iid,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and "/priorities/" in path:
                 parts=path.split("/"); db.execute("DELETE FROM priorities WHERE session_id=? AND indicator_id=?",(parts[3],parts[5])); db.commit(); return self.json(200,{"ok":True})
