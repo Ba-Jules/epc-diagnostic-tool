@@ -68,6 +68,10 @@ from epc.campaigns import (
     campaign_deletion_summary, delete_group_cascade, delete_campaign_cascade,
     campaign_kits_zip,
 )
+from epc.collecte import (
+    CollecteClosedError, create_participant, submit_response, complete_participant,
+    update_participant_display_name, participant_resume,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -1097,9 +1101,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "providers": {k: {"label": v["label"], "pricing": v["pricing"], "models": v["models"], "keyUrl": v["key_url"]} for k, v in AI_PROVIDERS.items()}})
             if path == "/api/participant":
                 sid, pid = query.get("session", [None])[0], query.get("participant", [None])[0]
-                participant = db.execute("SELECT * FROM participants WHERE id=? AND session_id=?", (pid, sid)).fetchone()
-                session = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
-                return self.json(200, {"session": dict(session) if session else None, "participant": dict(participant) if participant else None, "template": template_payload(db, session["template_id"]) if session else None, "responses": {r["indicator_id"]: json.loads(r["value_json"]) for r in db.execute("SELECT * FROM responses WHERE participant_id=?", (pid,))}})
+                return self.json(200, participant_resume(db, sid, pid))
             return self.serve_static(path)
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
@@ -1364,13 +1366,15 @@ class Handler(SimpleHTTPRequestHandler):
                 if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]): return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
                 sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"], None, None, None, None, None)); db.commit(); return self.json(201, {"id": sid})
             if path.endswith("/participants"):
-                sid = path.split("/")[3]; session = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
-                if not session or session["status"] != "open": return self.json(409, {"error": "Collecte fermée"})
-                pid, label = str(uuid.uuid4()), data.get("anonymousId") or f"P-{uuid.uuid4().hex[:6]}"; db.execute("INSERT INTO participants VALUES (?,?,?,?,?,?,?)", (pid, sid, label, "in_progress", now(), None, data.get("displayName") or None)); db.commit(); return self.json(201, {"id": pid, "anonymousId": label})
+                sid = path.split("/")[3]
+                try:
+                    return self.json(201, create_participant(db, sid, data))
+                except CollecteClosedError:
+                    return self.json(409, {"error": "Collecte fermée"})
             if path.endswith("/responses"):
-                sid = path.split("/")[3]; stamp = now(); db.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(participant_id,indicator_id) DO UPDATE SET value_json=excluded.value_json,value_type=excluded.value_type,updated_at=excluded.updated_at", (str(uuid.uuid4()), sid, data["participantId"], data["indicatorId"], json.dumps(data["value"]), data.get("valueType", "numeric"), stamp, stamp)); db.commit(); return self.json(200, {"ok": True})
+                sid = path.split("/")[3]; submit_response(db, sid, data); return self.json(200, {"ok": True})
             if path.endswith("/complete"):
-                pid = data["participantId"]; db.execute("UPDATE participants SET status='completed',completed_at=? WHERE id=?", (now(), pid)); db.commit(); return self.json(200, {"ok": True})
+                complete_participant(db, data["participantId"]); return self.json(200, {"ok": True})
             if path.endswith("/status"):
                 sid = path.split("/")[3]; status = data["status"]; db.execute("UPDATE sessions SET status=?,closed_at=? WHERE id=?", (status, now() if status == "closed" else None, sid)); db.commit(); return self.json(200, {"ok": True})
             if path.endswith("/priorities"):
@@ -1435,7 +1439,7 @@ class Handler(SimpleHTTPRequestHandler):
                     db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,sid))
                 db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/participants/"):
-                pid=path.split("/")[3]; db.execute("UPDATE participants SET display_name=? WHERE id=?",(data.get("displayName") or None,pid)); db.commit(); return self.json(200,{"ok":True})
+                pid=path.split("/")[3]; update_participant_display_name(db, pid, data.get("displayName")); return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
                 db.execute("UPDATE priority_analyses SET problem=?,updated_at=? WHERE id=?",(data.get("problem",""),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/ai-suggestions/"):

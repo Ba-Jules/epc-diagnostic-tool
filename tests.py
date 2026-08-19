@@ -360,4 +360,43 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(payload['name'],'Modele test import')
         self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),preview['rows'])
 
+    # --- Lot 1e (modularisation) : collecte participant extraite vers epc/collecte.py ---
+
+    def test_create_participant_rejects_closed_session(self):
+        sid=self._mk_session('sess-closed')
+        self.db.execute("update sessions set status='closed' where id=?",(sid,)); self.db.commit()
+        with self.assertRaises(app.CollecteClosedError):
+            app.create_participant(self.db,sid,{})
+
+    def test_create_participant_defaults_anonymous_id(self):
+        t=self._mk_session('sess-open')
+        out=app.create_participant(self.db,'sess-open',{'displayName':'Awa'})
+        self.assertTrue(out['anonymousId'].startswith('P-'))
+        row=self.db.execute('select * from participants where id=?',(out['id'],)).fetchone()
+        self.assertEqual(row['status'],'in_progress'); self.assertEqual(row['display_name'],'Awa')
+
+    def test_submit_response_and_complete_and_resume(self):
+        t=self._mk_session('sess-flow')
+        pid=app.create_participant(self.db,'sess-flow',{})['id']
+        inds=self._indicator_ids(t)
+        app.submit_response(self.db,'sess-flow',{'participantId':pid,'indicatorId':inds[0],'value':4})
+        resume=app.participant_resume(self.db,'sess-flow',pid)
+        self.assertEqual(resume['participant']['status'],'in_progress')
+        self.assertEqual(resume['responses'][inds[0]],4)
+        self.assertEqual(resume['template']['id'],t)
+        app.complete_participant(self.db,pid)
+        self.assertEqual(self.db.execute('select status from participants where id=?',(pid,)).fetchone()['status'],'completed')
+        # upsert: resubmitting the same indicator updates rather than duplicates
+        app.submit_response(self.db,'sess-flow',{'participantId':pid,'indicatorId':inds[0],'value':5})
+        self.assertEqual(self.db.execute('select count(*) from responses where participant_id=?',(pid,)).fetchone()[0],1)
+        self.assertEqual(app.participant_resume(self.db,'sess-flow',pid)['responses'][inds[0]],5)
+
+    def test_update_participant_display_name(self):
+        self._mk_session('sess-name')
+        pid=app.create_participant(self.db,'sess-name',{})['id']
+        app.update_participant_display_name(self.db,pid,'Nouveau nom')
+        self.assertEqual(self.db.execute('select display_name from participants where id=?',(pid,)).fetchone()['display_name'],'Nouveau nom')
+        app.update_participant_display_name(self.db,pid,'')
+        self.assertIsNone(self.db.execute('select display_name from participants where id=?',(pid,)).fetchone()['display_name'])
+
 if __name__=='__main__': unittest.main()
