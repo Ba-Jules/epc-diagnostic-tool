@@ -323,16 +323,13 @@ function removeSession(id,name,started=0,completed=0){
     <h2>Supprimer définitivement l’atelier ?</h2>
     <p><b>${name}</b></p>
     <p class="text-meta">${started} participant${started>1?'s':''} commencé${started>1?'s':''} · ${completed} questionnaire${completed>1?'s':''} validé${completed>1?'s':''}</p>
-    <p class="help-callout"><b>Attention :</b> cette action supprime aussi tous les participants, réponses, priorités, analyses et recommandations de cet atelier, même s’il est encore en cours. Impossible à annuler.</p>
-    <label>Pour confirmer, tapez le nom exact de l’atelier ci-dessus :<input type="text" id="confirm-delete-input" autocomplete="off"></label>
+    <p class="help-callout"><b>Attention :</b> ce projet contient des données sensibles et cet atelier est peut-être encore en cours — cette action supprime aussi tous les participants, réponses, priorités, analyses et recommandations. Impossible à annuler.</p>
     <div class="row" style="margin-top:.8rem">
-      <button id="confirm-delete-btn" class="danger" disabled>Confirmer la suppression</button>
+      <button id="confirm-delete-btn" class="danger">Confirmer la suppression</button>
       <button class="secondary" onclick="this.closest('.help-modal').remove()">Annuler</button>
     </div>
   </div>`;
-  let input=n.querySelector('#confirm-delete-input'),btn=n.querySelector('#confirm-delete-btn');
-  input.oninput=()=>{btn.disabled=(input.value!==name)};
-  btn.onclick=async()=>{n.remove();await api('/api/sessions/'+id,{method:'DELETE'});notice('Atelier supprimé.');await load()};
+  n.querySelector('#confirm-delete-btn').onclick=async()=>{n.remove();await api('/api/sessions/'+id,{method:'DELETE'});notice('Atelier supprimé.');await load()};
 }
 const level=v=>v==null?'—':v<20?'':v<=39?'Loin en dessous de la moyenne':v<=59?'En dessous de la moyenne':v<=70?'Moyen':v<=80?'Au-dessus de la moyenne':'Bien au-dessus de la moyenne';
 function radar(ds){let a=ds.filter(d=>d.capacity!=null),n=a.length;if(n<3)return '<p class="muted">Radar non disponible : au moins 3 domaines avec des données sont nécessaires.</p>';let cx=250,cy=235,r=170,p=(v,i)=>{let z=-Math.PI/2+i*2*Math.PI/n;return `${cx+Math.cos(z)*r*v/100},${cy+Math.sin(z)*r*v/100}`};return `<svg class="chart" viewBox="0 0 500 470"><text x="12" y="18" fill="#176b4b">■ Capacité</text><text x="120" y="18" fill="#536271">■ Consensus</text>${a.map((d,i)=>{let z=-Math.PI/2+i*2*Math.PI/n;return `<line x1="${cx}" y1="${cy}" x2="${cx+Math.cos(z)*r}" y2="${cy+Math.sin(z)*r}" stroke="#aab"/><text x="${cx+Math.cos(z)*(r+12)}" y="${cy+Math.sin(z)*(r+12)}" font-size="10">${esc(d.code||d.label).slice(0,9)}</text>`}).join('')}<polygon points="${a.map((d,i)=>p(d.capacity||0,i)).join(' ')}" fill="#176b4b55" stroke="#176b4b" stroke-width="3"/><polygon points="${a.map((d,i)=>p(d.consensus||0,i)).join(' ')}" fill="#53627144" stroke="#536271" stroke-width="3"/></svg>`}
