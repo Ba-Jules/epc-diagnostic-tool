@@ -60,13 +60,16 @@ from epc.auth import (
 from epc.templates import (
     MATRIX_COLUMNS, PARAMETERS, IMPORTS, next_order, clone_template,
     create_blank_template, matrix_xlsx, blank_matrix_xlsx, read_xlsx,
-    import_preview, save_import,
+    import_preview, save_import, update_template, delete_template,
+    create_domain, update_domain, delete_domain, create_indicator,
+    update_indicator, delete_indicator,
 )
 from epc.util import slugify
 from epc.campaigns import (
     SESSION_CHILD_TABLES, esc_html, session_label, generate_group_code,
     campaign_deletion_summary, delete_group_cascade, delete_campaign_cascade,
-    campaign_kits_zip,
+    campaign_kits_zip, create_campaign, update_campaign, create_group,
+    regenerate_group_relay, create_session, update_session,
 )
 from epc.collecte import (
     CollecteClosedError, create_participant, submit_response, complete_participant,
@@ -88,8 +91,6 @@ def export_filename(*parts, ext: str) -> str:
     slug = "_".join(slugify(p) for p in parts if p)
     return f"{slug}_{datetime.now().strftime('%Y-%m-%d')}.{ext}"
 
-
-GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#ea580c", "#4338ca"]
 
 # ==================================================
 # ASSISTANT IA OPTIONNEL — couche multi-fournisseur
@@ -1162,22 +1163,13 @@ class Handler(SimpleHTTPRequestHandler):
                 if not data.get("templateId"): return self.json(400, {"error": "Le questionnaire est obligatoire."})
                 tpl = db.execute("SELECT version FROM templates WHERE id=?", (data["templateId"],)).fetchone()
                 if not tpl: return self.json(404, {"error": "Questionnaire introuvable."})
-                cid = str(uuid.uuid4()); stamp = now()
-                db.execute("INSERT INTO campaigns VALUES (?,?,?,?,?,?,?,?,?,?,?)", (cid, user["id"], data["name"], data.get("description", ""), data.get("periodStart"), data.get("periodEnd"), data["templateId"], tpl["version"], "active", stamp, stamp))
-                db.commit(); return self.json(201, {"id": cid})
+                return self.json(201, {"id": create_campaign(db, user["id"], data["templateId"], tpl["version"], data)})
             if path.startswith("/api/campaigns/") and path.endswith("/groups"):
                 cid = path.split("/")[3]
                 camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
                 if not camp: return self.json(404, {"error": "Campagne introuvable."})
                 if not (data.get("name") or "").strip(): return self.json(400, {"error": "Le nom du groupe est obligatoire."})
-                campaign_codes = {r["group_code"] for r in db.execute("SELECT group_code FROM sessions WHERE campaign_id=?", (cid,))}
-                group_code = generate_group_code(db, data["name"])
-                group_color = GROUP_COLORS[len(campaign_codes) % len(GROUP_COLORS)]
-                sid = str(uuid.uuid4())
-                raw_token = secrets.token_urlsafe(24)
-                db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, camp["template_id"], camp["template_version"], data["name"], "", "", "", "open", now(), None, "", int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"], cid, group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token)))
-                db.commit()
-                return self.json(201, {"id": sid, "groupCode": group_code, "groupColor": group_color, "relayToken": raw_token})
+                return self.json(201, create_group(db, camp, user["id"], data))
             if path.startswith("/api/campaigns/") and path.endswith("/consolidate"):
                 cid = path.split("/")[3]
                 session_ids = data.get("sessionIds") or []
@@ -1199,17 +1191,14 @@ class Handler(SimpleHTTPRequestHandler):
                 parts = path.split("/"); sid = parts[5]
                 g = db.execute("SELECT id FROM sessions WHERE id=? AND campaign_id=?", (sid, parts[3])).fetchone()
                 if not g: return self.json(404, {"error": "Groupe introuvable."})
-                raw_token = secrets.token_urlsafe(24)
-                db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(raw_token), sid)); db.commit()
-                return self.json(200, {"relayToken": raw_token})
+                return self.json(200, {"relayToken": regenerate_group_relay(db, sid)})
             if path.startswith("/api/relay/") and path.endswith("/regenerate"):
                 token = path.split("/")[3]
                 g = db.execute("SELECT id, campaign_id FROM sessions WHERE relay_token_hash=?", (relay_token_hash(token),)).fetchone()
                 if not g: return self.json(404, {"error": "Lien relais introuvable."})
                 camp = db.execute("SELECT owner_user_id FROM campaigns WHERE id=?", (g["campaign_id"],)).fetchone()
                 if not camp or (user["role"] != "admin" and camp["owner_user_id"] != user["id"]): raise PermissionDeniedError()
-                new_token = secrets.token_urlsafe(24)
-                db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(new_token), g["id"])); db.commit()
+                new_token = regenerate_group_relay(db, g["id"])
                 return self.json(200, {"relayToken": new_token})
             if path == "/api/ai/test":
                 try:
@@ -1365,13 +1354,13 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/templates/") and path.endswith("/clone"):
                 return self.json(201,{"id":clone_template(db,path.split("/")[3],data.get("name"))})
             if path.startswith("/api/templates/") and path.endswith("/domains"):
-                tid=path.split("/")[3]; did=str(uuid.uuid4()); code=data.get("code") or "domain-"+uuid.uuid4().hex[:8]; db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,code,data["label"],data.get("description",""),int(data.get("displayOrder") or next_order(db,"domains","template_id",tid)),int(data.get("active",True)))); db.commit(); return self.json(201,{"id":did})
+                tid=path.split("/")[3]; return self.json(201,{"id":create_domain(db, tid, data)})
             if path.startswith("/api/domains/") and path.endswith("/indicators"):
-                did=path.split("/")[3]; iid=str(uuid.uuid4()); db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(iid,did,data.get("code") or "indicator-"+uuid.uuid4().hex[:8],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder") or next_order(db,"indicators","domain_id",did)),int(data.get("active",True)),json.dumps(data.get("configuration",{})))); db.commit(); return self.json(201,{"id":iid})
+                did=path.split("/")[3]; return self.json(201,{"id":create_indicator(db, did, data)})
             if path == "/api/sessions":
-                template = template_payload(db, data["templateId"])
-                if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]): return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
-                sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"], None, None, None, None, None)); db.commit(); return self.json(201, {"id": sid})
+                sid = create_session(db, user["id"], data)
+                if sid is None: return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
+                return self.json(201, {"id": sid})
             if path.endswith("/participants"):
                 sid = path.split("/")[3]
                 try:
@@ -1416,9 +1405,7 @@ class Handler(SimpleHTTPRequestHandler):
                 cid = path.rsplit("/", 1)[1]
                 camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
                 if not camp: return self.json(404, {"error": "Campagne introuvable."})
-                db.execute("UPDATE campaigns SET name=?,description=?,period_start=?,period_end=?,status=?,updated_at=? WHERE id=?",
-                    (data.get("name", camp["name"]), data.get("description", camp["description"]), data.get("periodStart", camp["period_start"]), data.get("periodEnd", camp["period_end"]), data.get("status", camp["status"]), now(), cid))
-                db.commit(); return self.json(200, {"ok": True})
+                update_campaign(db, camp, data); return self.json(200, {"ok": True})
             if path == "/api/ai/config":
                 if data.get("provider") and data["provider"] not in AI_PROVIDERS: return self.json(400, {"error": "Fournisseur IA inconnu."})
                 cur = get_ai_config(db)
@@ -1433,14 +1420,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "ON CONFLICT(session_id,section_key) DO UPDATE SET content=excluded.content,retained_at=excluded.retained_at",
                     (str(uuid.uuid4()), sid, section, content, now())); db.commit(); return self.json(200, {"ok": True})
             if path.startswith("/api/sessions/"):
-                sid=path.split("/")[3]; expected=int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None,"") else None
-                if data.get("templateId"):
-                    tpl=db.execute("SELECT version FROM templates WHERE id=?",(data["templateId"],)).fetchone()
-                    if not tpl: return self.json(404,{"error":"Questionnaire introuvable"})
-                    db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,template_id=?,template_version=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,data["templateId"],tpl["version"],sid))
-                else:
-                    db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,sid))
-                db.commit(); return self.json(200,{"ok":True})
+                sid=path.split("/")[3]
+                if not update_session(db, sid, data): return self.json(404,{"error":"Questionnaire introuvable"})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/participants/"):
                 pid=path.split("/")[3]; update_participant_display_name(db, pid, data.get("displayName")); return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
@@ -1456,17 +1438,15 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/training-topics/"):
                 update_training_topic(db, path.split("/")[3], data); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
-                tid=path.split("/")[3]; used=db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone()
-                if used:
-                    tid=clone_template(db,tid); data["versionCreated"]=True
-                old=template_payload(db,tid); scale=data.get("scale",old["scale"]); db.execute("UPDATE templates SET name=?,description=?,scale_json=?,priority_json=?,updated_at=? WHERE id=?",(data.get("name",old["name"]),data.get("description",old["description"]),json.dumps(scale),json.dumps(data.get("priority",old["priority"])),now(),tid)); db.commit(); return self.json(200,{"id":tid,"versionCreated":data.get("versionCreated",False)})
+                tid, version_created = update_template(db, path.split("/")[3], data)
+                return self.json(200,{"id":tid,"versionCreated":version_created})
             if path.startswith("/api/domains/"):
-                did=path.split("/")[3]; db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",(data["label"],data.get("description",""),int(data.get("displayOrder",1)),int(data.get("active",True)),did)); db.commit(); return self.json(200,{"ok":True})
+                did=path.split("/")[3]; update_domain(db, did, data); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]
                 if not (data.get("code") or "").strip(): return self.json(400,{"error":"La référence est obligatoire."})
                 if not (data.get("label") or "").strip(): return self.json(400,{"error":"La question est obligatoire."})
-                db.execute("UPDATE indicators SET domain_id=?,code=?,label=?,description=?,response_type=?,required=?,display_order=?,active=?,configuration_json=? WHERE id=?",(data["domainId"],data["code"],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder",1)),int(data.get("active",True)),json.dumps(data.get("configuration",{})),iid)); db.commit(); return self.json(200,{"ok":True})
+                update_indicator(db, iid, data); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
@@ -1510,25 +1490,25 @@ class Handler(SimpleHTTPRequestHandler):
                 delete_training_topic(db, path.split("/")[3]); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
                 tid=path.split("/")[3]
-                protected=db.execute("SELECT name FROM templates WHERE id=?",(tid,)).fetchone()
-                if protected and protected["name"] == "EPC / SENEVAL": return self.json(409,{"error":"Suppression impossible. EPC/SENEVAL est le modèle de référence ; dupliquez-le pour le modifier."})
-                if db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone():
-                    if parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1": db.execute("UPDATE templates SET status='archived',updated_at=? WHERE id=?",(now(),tid)); db.commit(); return self.json(200,{"ok":True,"archived":True})
-                    return self.json(409,{"error":"Suppression impossible. Ce questionnaire est utilisé par une ou plusieurs sessions d’atelier. Vous pouvez le conserver, créer une nouvelle version, ou confirmer son retrait de la liste des modèles."})
-                db.execute("DELETE FROM indicators WHERE domain_id IN (SELECT id FROM domains WHERE template_id=?)",(tid,)); db.execute("DELETE FROM domains WHERE template_id=?",(tid,)); db.execute("DELETE FROM templates WHERE id=?",(tid,)); db.commit(); return self.json(200,{"ok":True})
+                force = parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1"
+                result = delete_template(db, tid, force=force)
+                if result == "protected": return self.json(409,{"error":"Suppression impossible. EPC/SENEVAL est le modèle de référence ; dupliquez-le pour le modifier."})
+                if result == "archived": return self.json(200,{"ok":True,"archived":True})
+                if result == "in_use": return self.json(409,{"error":"Suppression impossible. Ce questionnaire est utilisé par une ou plusieurs sessions d’atelier. Vous pouvez le conserver, créer une nouvelle version, ou confirmer son retrait de la liste des modèles."})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/domains/"):
                 did=path.split("/")[3]
-                affected=rows(db,"SELECT DISTINCT s.id,s.name FROM sessions s JOIN responses r ON r.session_id=s.id JOIN indicators i ON i.id=r.indicator_id WHERE i.domain_id=?",(did,))
-                if affected:
+                deleted, affected = delete_domain(db, did)
+                if not deleted:
                     names=", ".join(a["name"] for a in affected)
                     return self.json(409,{"error":f"Suppression impossible : ce domaine contient des réponses dans {len(affected)} atelier(s) ({names}). Désactivez-le plutôt pour préserver l'historique.","sessions":affected})
-                db.execute("DELETE FROM indicators WHERE domain_id=?",(did,)); db.execute("DELETE FROM domains WHERE id=?",(did,)); db.commit(); return self.json(200,{"ok":True})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]
-                used=db.execute("SELECT COUNT(*) FROM responses WHERE indicator_id=?",(iid,)).fetchone()[0]
-                if used:
+                deleted, used = delete_indicator(db, iid)
+                if not deleted:
                     return self.json(409,{"error":f"Suppression impossible : {used} réponse(s) sont déjà enregistrées pour cette question. Désactivez-la plutôt pour préserver l'historique.","dependencies":used})
-                db.execute("DELETE FROM indicators WHERE id=?",(iid,)); db.commit(); return self.json(200,{"ok":True})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and "/priorities/" in path:
                 parts=path.split("/"); delete_priority(db, parts[3], parts[5]); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and len(path.rstrip("/").split("/")) == 4:

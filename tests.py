@@ -494,4 +494,121 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(sqlite3.OperationalError):
             app.create_analysis_note(self.db,'sess-legacy-bug',{'indicatorId':indicator,'kind':'cause','content':'Note V1'})
 
+    # --- Lot 1g (modularisation) : CRUD questionnaires/domaines/indicateurs extrait vers epc/templates.py ---
+
+    def test_create_update_delete_domain(self):
+        tid=app.create_blank_template(self.db,{'name':'Modele domaines'})
+        self.db.commit()
+        did=app.create_domain(self.db,tid,{'label':'Domaine 1'})
+        self.assertEqual(app.template_payload(self.db,tid)['domains'][0]['label'],'Domaine 1')
+        app.update_domain(self.db,did,{'label':'Domaine renomme','displayOrder':1,'active':True})
+        self.assertEqual(app.template_payload(self.db,tid)['domains'][0]['label'],'Domaine renomme')
+        deleted,affected=app.delete_domain(self.db,did)
+        self.assertTrue(deleted); self.assertEqual(affected,[])
+        self.assertEqual(app.template_payload(self.db,tid)['domains'],[])
+
+    def test_delete_domain_blocked_by_responses(self):
+        t=self.db.execute('select id from templates').fetchone()['id']
+        sid=self._mk_session('sess-dom-block')
+        inds=self._indicator_ids(t)
+        domain=self.db.execute('select domain_id from indicators where id=?',(inds[0],)).fetchone()['domain_id']
+        self._add_participant('sess-dom-block','p0',t,value=4,n=1)
+        deleted,affected=app.delete_domain(self.db,domain)
+        self.assertFalse(deleted); self.assertEqual(len(affected),1)
+
+    def test_create_update_delete_indicator(self):
+        tid=app.create_blank_template(self.db,{'name':'Modele indicateurs'})
+        self.db.commit()
+        did=app.create_domain(self.db,tid,{'label':'Domaine 1'})
+        iid=app.create_indicator(self.db,did,{'label':'Q1'})
+        app.update_indicator(self.db,iid,{'domainId':did,'code':'q1','label':'Q1 modifiee'})
+        row=self.db.execute('select code,label from indicators where id=?',(iid,)).fetchone()
+        self.assertEqual((row['code'],row['label']),('q1','Q1 modifiee'))
+        deleted,used=app.delete_indicator(self.db,iid)
+        self.assertTrue(deleted); self.assertEqual(used,0)
+
+    def test_delete_indicator_blocked_by_responses(self):
+        t=self.db.execute('select id from templates').fetchone()['id']
+        self._mk_session('sess-ind-block')
+        self._add_participant('sess-ind-block','p0',t,value=4,n=1)
+        indicator=self._indicator_ids(t)[0]
+        deleted,used=app.delete_indicator(self.db,indicator)
+        self.assertFalse(deleted); self.assertEqual(used,1)
+
+    def test_update_template_forks_when_used_by_a_session(self):
+        t=self.db.execute('select id from templates').fetchone()['id']
+        self._mk_session('sess-tpl-fork')
+        new_id,version_created=app.update_template(self.db,t,{'name':'EPC / SENEVAL modifie'})
+        self.assertTrue(version_created); self.assertNotEqual(new_id,t)
+        self.assertEqual(self.db.execute('select name from templates where id=?',(t,)).fetchone()['name'],'EPC / SENEVAL')
+        self.assertEqual(self.db.execute('select name from templates where id=?',(new_id,)).fetchone()['name'],'EPC / SENEVAL modifie')
+
+    def test_update_template_edits_in_place_when_unused(self):
+        tid=app.create_blank_template(self.db,{'name':'Modele libre'})
+        self.db.commit()
+        new_id,version_created=app.update_template(self.db,tid,{'name':'Modele renomme'})
+        self.assertFalse(version_created); self.assertEqual(new_id,tid)
+        self.assertEqual(self.db.execute('select name from templates where id=?',(tid,)).fetchone()['name'],'Modele renomme')
+
+    def test_delete_template_outcomes(self):
+        epc_id=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        self.assertEqual(app.delete_template(self.db,epc_id),'protected')
+        tid=app.create_blank_template(self.db,{'name':'Modele suppression'})
+        self.db.commit()
+        self._mk_session('sess-tpl-del',owner=None)
+        self.db.execute('update sessions set template_id=? where id=?',(tid,'sess-tpl-del')); self.db.commit()
+        self.assertEqual(app.delete_template(self.db,tid,force=False),'in_use')
+        self.assertEqual(app.delete_template(self.db,tid,force=True),'archived')
+        tid2=app.create_blank_template(self.db,{'name':'Modele suppression 2'})
+        self.db.commit()
+        self.assertEqual(app.delete_template(self.db,tid2),'deleted')
+        self.assertIsNone(self.db.execute('select id from templates where id=?',(tid2,)).fetchone())
+
+    # --- Lot 1h (modularisation) : CRUD campagnes/groupes/sessions extrait vers epc/campaigns.py ---
+
+    def test_create_campaign_and_update(self):
+        uid=self._mk_user('u-camp')
+        t=self.db.execute('select id,version from templates').fetchone()
+        cid=app.create_campaign(self.db,uid,t['id'],t['version'],{'name':'Campagne creee'})
+        camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        self.assertEqual(camp['name'],'Campagne creee'); self.assertEqual(camp['owner_user_id'],uid)
+        app.update_campaign(self.db,camp,{'name':'Campagne renommee','status':'closed'})
+        camp2=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        self.assertEqual(camp2['name'],'Campagne renommee'); self.assertEqual(camp2['status'],'closed')
+
+    def test_create_group_generates_code_and_color(self):
+        uid=self._mk_user('u-grp')
+        t=self.db.execute('select id,version from templates').fetchone()
+        cid=app.create_campaign(self.db,uid,t['id'],t['version'],{'name':'Campagne groupes'})
+        camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        g1=app.create_group(self.db,camp,uid,{'name':'Groupe A'})
+        g2=app.create_group(self.db,camp,uid,{'name':'Groupe B'})
+        self.assertNotEqual(g1['groupCode'],g2['groupCode'])
+        self.assertNotEqual(g1['groupColor'],g2['groupColor'])
+        self.assertTrue(g1['relayToken'])
+
+    def test_regenerate_group_relay_changes_token_hash(self):
+        sid=self._mk_session('sess-relay')
+        before=app.relay_token_hash('token-a')
+        self.db.execute('update sessions set relay_token_hash=? where id=?',(before,'sess-relay')); self.db.commit()
+        new_token=app.regenerate_group_relay(self.db,'sess-relay')
+        after=self.db.execute('select relay_token_hash from sessions where id=?',('sess-relay',)).fetchone()['relay_token_hash']
+        self.assertNotEqual(before,after)
+        self.assertEqual(app.relay_token_hash(new_token),after)
+
+    def test_create_session_rejects_questionnaire_without_active_question(self):
+        empty_tid=app.create_blank_template(self.db,{'name':'Modele vide'})
+        self.db.commit()
+        self.assertIsNone(app.create_session(self.db,'owner-x',{'templateId':empty_tid,'name':'Atelier'}))
+        t=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        sid=app.create_session(self.db,'owner-x',{'templateId':t,'name':'Atelier valide'})
+        self.assertIsNotNone(sid)
+        self.assertEqual(self.db.execute('select name from sessions where id=?',(sid,)).fetchone()['name'],'Atelier valide')
+
+    def test_update_session_rejects_unknown_template(self):
+        self._mk_session('sess-upd')
+        self.assertFalse(app.update_session(self.db,'sess-upd',{'name':'x','templateId':'does-not-exist'}))
+        self.assertTrue(app.update_session(self.db,'sess-upd',{'name':'Atelier renomme'}))
+        self.assertEqual(self.db.execute('select name from sessions where id=?',('sess-upd',)).fetchone()['name'],'Atelier renomme')
+
 if __name__=='__main__': unittest.main()

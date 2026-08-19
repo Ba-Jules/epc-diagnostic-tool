@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import uuid
 import zipfile
 from io import BytesIO
 
 from .auth import relay_token_hash
-from .db import rows
+from .db import now, rows, template_payload
 from .util import slugify
 
 # Every table that hangs off a session row via session_id — deleting a session (alone,
 # or as part of a campaign cascade) always means deleting exactly these first.
 SESSION_CHILD_TABLES = ("training_topics", "workshop_recommendations", "analysis_entries", "priority_analyses",
                          "analysis_notes", "recommendations", "responses", "priorities", "participants", "session_report_meta")
+
+GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#ea580c", "#4338ca"]
 
 
 def esc_html(s) -> str:
@@ -141,3 +144,69 @@ def campaign_kits_zip(db: sqlite3.Connection, campaign_id: str, base_url: str) -
             zf.writestr(f"kit_{slugify(g['group_code'] or g['name'])}.html", html)
     db.commit()
     return buf.getvalue()
+
+
+def create_campaign(db: sqlite3.Connection, owner_user_id: str, template_id: str, template_version: int, data: dict) -> str:
+    cid, stamp = str(uuid.uuid4()), now()
+    db.execute("INSERT INTO campaigns VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, owner_user_id, data["name"], data.get("description", ""), data.get("periodStart"), data.get("periodEnd"), template_id, template_version, "active", stamp, stamp))
+    db.commit()
+    return cid
+
+
+def update_campaign(db: sqlite3.Connection, campaign, data: dict) -> None:
+    db.execute("UPDATE campaigns SET name=?,description=?,period_start=?,period_end=?,status=?,updated_at=? WHERE id=?",
+        (data.get("name", campaign["name"]), data.get("description", campaign["description"]), data.get("periodStart", campaign["period_start"]), data.get("periodEnd", campaign["period_end"]), data.get("status", campaign["status"]), now(), campaign["id"]))
+    db.commit()
+
+
+def create_group(db: sqlite3.Connection, campaign, owner_user_id: str, data: dict) -> dict:
+    campaign_codes = {r["group_code"] for r in db.execute("SELECT group_code FROM sessions WHERE campaign_id=?", (campaign["id"],))}
+    group_code = generate_group_code(db, data["name"])
+    group_color = GROUP_COLORS[len(campaign_codes) % len(GROUP_COLORS)]
+    sid = str(uuid.uuid4())
+    raw_token = secrets.token_urlsafe(24)
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, campaign["template_id"], campaign["template_version"], data["name"], "", "", "", "open", now(), None, "",
+         int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None,
+         owner_user_id, campaign["id"], group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token)))
+    db.commit()
+    return {"id": sid, "groupCode": group_code, "groupColor": group_color, "relayToken": raw_token}
+
+
+def regenerate_group_relay(db: sqlite3.Connection, session_id: str) -> str:
+    raw_token = secrets.token_urlsafe(24)
+    db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(raw_token), session_id))
+    db.commit()
+    return raw_token
+
+
+def create_session(db: sqlite3.Connection, owner_user_id: str, data: dict):
+    """Standalone (non-campaign) session. Returns None if the questionnaire has
+    no active domain with an active question, same refusal as the historical route."""
+    template = template_payload(db, data["templateId"])
+    if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]):
+        return None
+    sid = str(uuid.uuid4())
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""),
+         int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, owner_user_id, None, None, None, None, None))
+    db.commit()
+    return sid
+
+
+def update_session(db: sqlite3.Connection, session_id: str, data: dict) -> bool:
+    """Returns False (no mutation) if a requested templateId doesn't exist,
+    same refusal as the historical route."""
+    expected = int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None
+    if data.get("templateId"):
+        tpl = db.execute("SELECT version FROM templates WHERE id=?", (data["templateId"],)).fetchone()
+        if not tpl:
+            return False
+        db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,template_id=?,template_version=? WHERE id=?",
+            (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, data["templateId"], tpl["version"], session_id))
+    else:
+        db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",
+            (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, session_id))
+    db.commit()
+    return True

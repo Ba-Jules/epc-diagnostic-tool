@@ -22,7 +22,7 @@ try:  # Used only to generate the downloadable Excel template; the app stays loc
 except ImportError:
     xlsxwriter = None
 
-from .db import GRADING, now, template_payload
+from .db import GRADING, now, rows, template_payload
 
 MATRIX_COLUMNS = ["Domaine", "Ordre domaine", "Code indicateur", "Indicateur", "Description", "Ordre indicateur", "Type réponse", "Obligatoire", "Actif"]
 PARAMETERS = ["Nom questionnaire", "Description", "Version", "Type d'échelle", "Valeur minimum", "Valeur maximum", "Libellés des valeurs", "Nombre de priorités par domaine"]
@@ -148,3 +148,92 @@ def save_import(db, data, owner_user_id=None):
         did=str(uuid.uuid4()); code="domain-"+uuid.uuid4().hex[:8]; db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,code,d["label"],"",d["display_order"],1))
         for i in d["indicators"]: db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),did,i["code"],i["label"],i["description"],i["response_type"],int(i["required"]),i["display_order"],int(i["active"]),"{}"))
     db.commit(); return tid
+
+
+def update_template(db, template_id, data):
+    """Editing a template already used by a session forks it first (clone_template),
+    exactly like the historical PUT route did: the old version stays untouched."""
+    used = db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1", (template_id,)).fetchone()
+    version_created = False
+    if used:
+        template_id = clone_template(db, template_id)
+        version_created = True
+    old = template_payload(db, template_id)
+    scale = data.get("scale", old["scale"])
+    db.execute("UPDATE templates SET name=?,description=?,scale_json=?,priority_json=?,updated_at=? WHERE id=?",
+        (data.get("name", old["name"]), data.get("description", old["description"]), json.dumps(scale), json.dumps(data.get("priority", old["priority"])), now(), template_id))
+    db.commit()
+    return template_id, version_created
+
+
+def delete_template(db, template_id, force=False):
+    """Returns one of "protected" (EPC/SENEVAL, never deletable), "in_use" (blocked
+    unless force=True, in which case it's archived instead of deleted), or "deleted"."""
+    protected = db.execute("SELECT name FROM templates WHERE id=?", (template_id,)).fetchone()
+    if protected and protected["name"] == "EPC / SENEVAL":
+        return "protected"
+    if db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1", (template_id,)).fetchone():
+        if force:
+            db.execute("UPDATE templates SET status='archived',updated_at=? WHERE id=?", (now(), template_id))
+            db.commit()
+            return "archived"
+        return "in_use"
+    db.execute("DELETE FROM indicators WHERE domain_id IN (SELECT id FROM domains WHERE template_id=?)", (template_id,))
+    db.execute("DELETE FROM domains WHERE template_id=?", (template_id,))
+    db.execute("DELETE FROM templates WHERE id=?", (template_id,))
+    db.commit()
+    return "deleted"
+
+
+def create_domain(db, template_id, data):
+    did = str(uuid.uuid4())
+    code = data.get("code") or "domain-" + uuid.uuid4().hex[:8]
+    db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",
+        (did, template_id, code, data["label"], data.get("description", ""), int(data.get("displayOrder") or next_order(db, "domains", "template_id", template_id)), int(data.get("active", True))))
+    db.commit()
+    return did
+
+
+def update_domain(db, domain_id, data):
+    db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",
+        (data["label"], data.get("description", ""), int(data.get("displayOrder", 1)), int(data.get("active", True)), domain_id))
+    db.commit()
+
+
+def delete_domain(db, domain_id):
+    """Refuses (returns False, affected_sessions) if any response in any session
+    references an indicator of this domain; affected_sessions is then the read-only
+    list shown to the pilote (id/name), same as the historical DELETE route."""
+    affected = rows(db, "SELECT DISTINCT s.id,s.name FROM sessions s JOIN responses r ON r.session_id=s.id JOIN indicators i ON i.id=r.indicator_id WHERE i.domain_id=?", (domain_id,))
+    if affected:
+        return False, affected
+    db.execute("DELETE FROM indicators WHERE domain_id=?", (domain_id,))
+    db.execute("DELETE FROM domains WHERE id=?", (domain_id,))
+    db.commit()
+    return True, affected
+
+
+def create_indicator(db, domain_id, data):
+    iid = str(uuid.uuid4())
+    code = data.get("code") or "indicator-" + uuid.uuid4().hex[:8]
+    db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (iid, domain_id, code, data["label"], data.get("description", ""), data.get("responseType", "numeric"), int(data.get("required", True)), int(data.get("displayOrder") or next_order(db, "indicators", "domain_id", domain_id)), int(data.get("active", True)), json.dumps(data.get("configuration", {}))))
+    db.commit()
+    return iid
+
+
+def update_indicator(db, indicator_id, data):
+    db.execute("UPDATE indicators SET domain_id=?,code=?,label=?,description=?,response_type=?,required=?,display_order=?,active=?,configuration_json=? WHERE id=?",
+        (data["domainId"], data["code"], data["label"], data.get("description", ""), data.get("responseType", "numeric"), int(data.get("required", True)), int(data.get("displayOrder", 1)), int(data.get("active", True)), json.dumps(data.get("configuration", {})), indicator_id))
+    db.commit()
+
+
+def delete_indicator(db, indicator_id):
+    """Refuses (returns False, used_count) if responses already reference this
+    indicator, same as the historical DELETE route."""
+    used = db.execute("SELECT COUNT(*) FROM responses WHERE indicator_id=?", (indicator_id,)).fetchone()[0]
+    if used:
+        return False, used
+    db.execute("DELETE FROM indicators WHERE id=?", (indicator_id,))
+    db.commit()
+    return True, used
