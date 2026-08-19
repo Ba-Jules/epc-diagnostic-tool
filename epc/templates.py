@@ -113,8 +113,14 @@ def import_preview(raw):
             if not all(r): errors.append("Chaque ligne doit contenir Domaine, Référence et Indicateur qualitatif ou Capacité"); continue
             if r[0] not in grouped: grouped[r[0]]=[]; order.append(r[0])
             grouped[r[0]].append({"code":"","label":r[1],"description":r[2],"response_type":"numeric","required":True,"active":True,"display_order":len(grouped[r[0]])})
-        if not values.get("Nom du questionnaire","").strip(): errors.append("Nom du questionnaire obligatoire")
-        return {"errors":errors,"template":{"name":values.get("Nom du questionnaire",""),"description":values.get("Description",""),"scale":{"type":"numeric","min":smin,"max":smax,"labels":labels},"priority":{"maxPerDomain":3},"domains":[{"label":d,"display_order":n+1,"indicators":grouped[d]} for n,d in enumerate(order)]},"rows":sum(len(v) for v in grouped.values())}
+        # matrix_xlsx() labels the PARAMETRES name cell "Nom du questionnaire (à
+        # remplacer par le vôtre)" (an in-sheet instruction, not to be edited by the
+        # user - see MODE D'EMPLOI); accept that key too so a workbook downloaded via
+        # matrix_xlsx() can be re-imported unedited, alongside a plain "Nom du
+        # questionnaire" key for hand-built workbooks.
+        name = values.get("Nom du questionnaire") or values.get("Nom du questionnaire (à remplacer par le vôtre)") or ""
+        if not name.strip(): errors.append("Nom du questionnaire obligatoire")
+        return {"errors":errors,"template":{"name":name,"description":values.get("Description",""),"scale":{"type":"numeric","min":smin,"max":smax,"labels":labels},"priority":{"maxPerDomain":3},"domains":[{"label":d,"display_order":n+1,"indicators":grouped[d]} for n,d in enumerate(order)]},"rows":sum(len(v) for v in grouped.values())}
     if "INDICATEURS" not in sheets or "PARAMETRES" not in sheets: raise ValueError("Les feuilles INDICATEURS et PARAMETRES sont obligatoires")
     rows_i=sheets["INDICATEURS"]; header_index=next((n for n,r in enumerate(rows_i) if r[:len(MATRIX_COLUMNS)]==MATRIX_COLUMNS),None)
     if header_index is None: errors.append("Colonnes INDICATEURS invalides ou dans un ordre incorrect"); header_index=len(rows_i)

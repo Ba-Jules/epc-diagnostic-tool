@@ -1,4 +1,3 @@
-import sqlite3
 import tempfile
 import uuid
 import unittest
@@ -331,15 +330,27 @@ class EngineTests(unittest.TestCase):
         xlsx_bytes=app.matrix_xlsx(app.template_payload(self.db,t))
         self.assertGreater(len(xlsx_bytes),1000)
 
+    def test_matrix_xlsx_roundtrips_through_import_preview(self):
+        # Fixed bug (see epc/templates.py import_preview): matrix_xlsx() labels the
+        # PARAMETRES name cell "Nom du questionnaire (à remplacer par le vôtre)" (an
+        # in-sheet instruction) - import_preview() now accepts that key too, so a
+        # workbook downloaded via matrix_xlsx() can be re-imported unedited.
+        template={'name':'Modele export-import','description':'','version':1,
+            'scale':{'type':'numeric','min':1,'max':5,'labels':{}},'priority':{'maxPerDomain':3},
+            'domains':[{'label':'Domaine A','indicators':[
+                {'label':'Q1','description':'Premiere question'},
+                {'label':'Q2','description':'Deuxieme question'},
+            ]}]}
+        preview=app.import_preview(app.matrix_xlsx(template))
+        self.assertEqual(preview['errors'],[])
+        self.assertEqual(preview['template']['name'],'Modele export-import')
+        self.assertEqual(preview['rows'],2)
+
     def _questionnaire_xlsx(self,name='Modele test import',rows=(('Domaine A','Q1','Premiere question'),('Domaine A','Q2','Deuxieme question'))):
         # Built directly with xlsxwriter (not via app.matrix_xlsx) so this test targets
-        # import_preview()/save_import() in isolation, using exactly the PARAMETRES keys
-        # ("Nom du questionnaire", "Description") that import_preview's QUESTIONNAIRE-sheet
-        # path reads. NB: app.matrix_xlsx() itself writes a longer PARAMETRES key ("Nom du
-        # questionnaire (à remplacer par le vôtre)") that import_preview does not recognise,
-        # so a workbook downloaded via matrix_xlsx() cannot be re-imported unedited as-is -
-        # a pre-existing mismatch between the two, unrelated to this refactor (copied
-        # verbatim from app.py into epc/templates.py).
+        # import_preview()/save_import() in isolation with a plain "Nom du questionnaire"
+        # PARAMETRES key (a hand-built workbook, as opposed to one downloaded via
+        # app.matrix_xlsx() - see test_matrix_xlsx_roundtrips_through_import_preview).
         out=BytesIO(); wb=xlsxwriter.Workbook(out,{'in_memory':True})
         ps=wb.add_worksheet('PARAMETRES'); ps.write_row(0,0,['Nom du questionnaire',name]); ps.write_row(1,0,['Description',''])
         qs=wb.add_worksheet('QUESTIONNAIRE'); qs.write_row(0,0,['Domaine','Référence','Indicateur qualitatif ou Capacité'])
@@ -483,16 +494,16 @@ class EngineTests(unittest.TestCase):
         app.create_legacy_recommendation(self.db,'sess-legacy',{'indicatorId':indicator,'title':'Reco V1'})
         self.assertEqual(self.db.execute('select count(*) from recommendations where session_id=?',('sess-legacy',)).fetchone()[0],1)
 
-    def test_legacy_v1_analysis_note_has_a_preexisting_column_count_bug(self):
-        # Pre-existing bug, unrelated to this refactor (present verbatim on master @
-        # 909236c, before any modularisation commit): the INSERT statement has 9 "?"
-        # placeholders for the 8-column analysis_notes table, so this legacy V1 route
-        # has never worked. Documented here rather than "fixed" - Lot 1 only relocates
-        # code, it must not change behaviour (see AUDIT_MODULARISATION_8800.md).
-        t=self._mk_session('sess-legacy-bug')
+    def test_legacy_v1_analysis_note_column_count_bug_is_fixed(self):
+        # Was broken since before this modularisation (9 "?" placeholders for the
+        # 8-column analysis_notes table, present verbatim on master @909236c) -
+        # fixed as a separate, documented change (see epc/qualitatif.py). This
+        # legacy V1 route now behaves like create_legacy_recommendation.
+        self._mk_session('sess-legacy-fixed')
         indicator=self.db.execute('select id from indicators limit 1').fetchone()['id']
-        with self.assertRaises(sqlite3.OperationalError):
-            app.create_analysis_note(self.db,'sess-legacy-bug',{'indicatorId':indicator,'kind':'cause','content':'Note V1'})
+        app.create_analysis_note(self.db,'sess-legacy-fixed',{'indicatorId':indicator,'kind':'cause','content':'Note V1'})
+        row=self.db.execute('select * from analysis_notes where session_id=?',('sess-legacy-fixed',)).fetchone()
+        self.assertEqual(row['kind'],'cause'); self.assertEqual(row['content'],'Note V1'); self.assertEqual(row['validation_status'],'HYPOTHESE')
 
     # --- Lot 1g (modularisation) : CRUD questionnaires/domaines/indicateurs extrait vers epc/templates.py ---
 

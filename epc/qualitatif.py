@@ -120,9 +120,15 @@ def upsert_report_meta(db: sqlite3.Connection, session_id: str, data: dict) -> N
 
 def create_analysis_note(db: sqlite3.Connection, session_id: str, data: dict) -> None:
     """Legacy V1 route (/analysis-notes), superseded by priority-analyses/analysis-entries
-    but kept working as-is: some older sessions may still use it."""
+    but kept working as-is: some older sessions may still use it.
+
+    Fix (previously broken since before this modularisation, see AUDIT_MODULARISATION_8800.md
+    lot 1f commit message): the INSERT had 9 "?" placeholders for analysis_notes' 8 columns
+    (id, session_id, indicator_id, kind, content, validation_status, created_at, updated_at),
+    so this route always raised sqlite3.OperationalError. Placeholder count corrected to 8;
+    no column, no value, no ordering changed."""
     stamp = now()
-    db.execute("INSERT INTO analysis_notes VALUES (?,?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO analysis_notes VALUES (?,?,?,?,?,?,?,?)",
         (str(uuid.uuid4()), session_id, data.get("indicatorId"), data["kind"], data["content"], data.get("validationStatus", "HYPOTHESE"), stamp, stamp))
     db.commit()
 
