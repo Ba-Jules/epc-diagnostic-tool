@@ -499,6 +499,7 @@ def init_db(db: sqlite3.Connection) -> None:
     ensure_private_templates_for_started_sessions(db)
     migrate_reference_questionnaire(db)
     migrate_ownership(db)
+    ensure_epc_35_template(db)
 
 
 def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
@@ -647,6 +648,96 @@ def seed_epc(db: sqlite3.Connection) -> str:
             db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, reference, enonce, "", "numeric", 1, i_order, 1, "{}"))
     db.commit()
     return tid
+
+
+# Nouveau questionnaire SenEval reduit, fourni par le pilote (mouhba@local) le 19/08/2026 :
+# source de verite = le document local "6 Diagnostic de SenEval selon  EPC MB Envoye PAB.docx"
+# (extrait mecaniquement via python-docx, aucune reformulation). 7 domaines x 5 indicateurs = 35.
+# Ce DOCX ne fournit aucune reference courte separee par indicateur (contrairement a EPC_DOMAINS) :
+# indicators.code est donc rempli avec le numero d'ordre global "1".."35", conformement a la
+# consigne ("ordre 1 a 35"). Distinct et independant du referentiel canonique EPC_DOMAINS/70 :
+# ensure_epc_35_template() ne touche jamais ce dernier ni ses forks.
+EPC_DOMAINS_5 = [
+    ('grh', '1 Gestion des ressources humaines', [
+        'Le membre de l’association possède les compétences appropriées pour accomplir la mission',
+        'Les pratiques de supervision renforcent les capacités du membre à atteindre les objectifs',
+        "La formation offerte est directement liée aux priorités de l'organisation",
+        "L'évaluation du membre favorise sa motivation et sa fidélisation",
+        "L'allocation des tâches et des responsabilités favorise la fidélisation du membre",
+    ]),
+    ('grf', '2 Gestion des ressources financières', [
+        'La stratégie de mobilisation des cotisations est efficace',
+        "Les sources de financement de l’association sont diversifiées",
+        "Le niveau d'appui des partenaires au développement est stable ou croissant",
+        'Les ressources disponibles permettent de réaliser correctement les activités',
+        'Les fonds mobilisés sont adéquatement alloués aux activités',
+    ]),
+    ('parteq', '3 Gestion de la participation équitable', [
+        'Les parties prenantes participent à la conception des projets',
+        "Les parties prenantes participent à la mise en œuvre des projets",
+        'Les parties prenantes participent aux Groupes techniques de travail',
+        'Les projets et activités sont suivis et évalués',
+        "L'organisation entretient un dialogue régulier avec les décideurs et les institutions concernés",
+    ]),
+    ('dur', '4 Gestion de la durabilité des acquis', [
+        'La durabilité institutionnelle est intégrée dès la conception des projets',
+        'La durabilité institutionnelle est prise en compte pendant la mise en œuvre',
+        "La durabilité institutionnelle est évaluée lors du suivi et de l'évaluation",
+        "L'appui technique contribue effectivement à la durabilité des résultats",
+        'La durabilité économique est intégrée dès la conception des projets',
+    ]),
+    ('partn', '5 Gestion du partenariat', [
+        "L'organisation développe des partenariats productifs avec d'autres organisations",
+        "Les partenariats font l'objet d'un suivi régulier",
+        'Les partenariats reposent sur des mécanismes favorisant la confiance et la coopération',
+        'Chaque partenaire contribue effectivement aux objectifs communs',
+        'Les partenariats permettent de développer de nouveaux réseaux et relations stratégiques',
+    ]),
+    ('apporg', "6 Gestion de l'apprentissage organisationnel", [
+        "Les projets font régulièrement l'objet d'un suivi-évaluation",
+        "Les réunions favorisent l'apprentissage organisationnel",
+        "L'organisation dispose des informations nécessaires pour répondre à ses priorités",
+        'Les structures reconnaissent leur interdépendance dans la résolution des problèmes',
+        "L'organisation encourage l'innovation et une prise de risque maîtrisée",
+    ]),
+    ('gouv', '7 Gestion stratégique et gouvernance', [
+        'Les initiatives sont alignées sur les plans stratégiques et opérationnels',
+        'Les progrès vers les objectifs stratégiques sont suivis régulièrement',
+        "Les organes fonctionnent régulièrement en respectant  les objectifs de l'organisation",
+        'La planification stratégique  est déclinée en plans d’action opérationnels',
+        'Le Comité de coordination contribue efficacement à la mobilisation des ressources',
+    ]),
+]
+
+EPC_35_TEMPLATE_NAME = "EPC / SENEVAL (7 domaines x 5 indicateurs)"
+
+
+def ensure_epc_35_template(db: sqlite3.Connection) -> None:
+    """Cree une fois, de maniere idempotente, le nouveau gabarit reduit EPC_DOMAINS_5 (7x35),
+    fourni par le pilote le 19/08/2026 pour ses futures missions. Purement additif : un seul
+    INSERT sur une ligne 'templates' entierement nouvelle (is_canonical=0), jamais un UPDATE/DELETE
+    sur le referentiel canonique, sur EPC_DOMAINS, ni sur une mission existante. Reprend
+    exactement la meme echelle/formule de capacite/consensus/bareme que seed_epc() : seul le nombre
+    d'indicateurs par domaine change, aucune formule EPC n'est modifiee. Rattache au compte
+    mouhba@local (recherche par email, jamais un id code en dur) pour qu'il apparaisse comme un
+    gabarit lui appartenant, exactement comme s'il l'avait cree lui-meme depuis l'appli."""
+    if db.execute("SELECT 1 FROM templates WHERE name=?", (EPC_35_TEMPLATE_NAME,)).fetchone():
+        return
+    owner = db.execute("SELECT id FROM users WHERE email=?", ("mouhba@local",)).fetchone()
+    owner_user_id = owner["id"] if owner else None
+    tid, stamp = str(uuid.uuid4()), now()
+    scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
+    scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
+    consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, EPC_35_TEMPLATE_NAME, 1, "Questionnaire réduit fourni par le pilote (7 domaines x 5 indicateurs).", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, owner_user_id, 0))
+    order_num = 1
+    for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS_5, 1):
+        did = str(uuid.uuid4())
+        db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
+        for i_order, enonce in enumerate(indicators, 1):
+            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, str(order_num), enonce, "", "numeric", 1, i_order, 1, "{}"))
+            order_num += 1
+    db.commit()
 
 
 def rows(db: sqlite3.Connection, sql: str, args=()):

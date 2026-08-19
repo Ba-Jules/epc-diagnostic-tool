@@ -10,24 +10,24 @@ class EngineTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(); self.db=app.connect(Path(self.tmp.name)/'test.sqlite3'); app.init_db(self.db)
     def tearDown(self): self.db.close(); self.tmp.cleanup()
     def _mk_session(self,sid,name='test',template=None):
-        t=template or self.db.execute('select id,version from templates').fetchone()
+        t=template or self.db.execute('select id,version from templates where is_canonical=1').fetchone()
         self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],name,'','','', 'open',app.now(),None,'',None,None))
         self.db.commit()
     def _mk_participant(self,sid,pid,status='in_progress'):
         self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',(pid,sid,pid,status,app.now(),app.now() if status=='completed' else None,None))
         self.db.commit()
     def test_epc_seed_has_seven_domains_and_seventy_indicators(self):
-        t=self.db.execute('select id from templates').fetchone()['id']; payload=app.template_payload(self.db,t)
+        t=self.db.execute('select id from templates where is_canonical=1').fetchone()['id']; payload=app.template_payload(self.db,t)
         self.assertEqual(len(payload['domains']),7); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),70)
     def test_grade_and_analysis_keep_raw_responses(self):
-        t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
+        t=self.db.execute('select id,version from templates where is_canonical=1').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         for n,v in [('a',1),('b',5)]:
             pid=n; self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',(pid,sid,n,'completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,inds,str(v),'numeric',app.now(),app.now()))
         self.db.commit(); out=app.analysis(self.db,sid); indicator=out['domains'][0]['indicators'][0]
         self.assertEqual(indicator['responses'],2); self.assertEqual(indicator['capacity'],60); self.assertEqual(indicator['consensus'],0); self.assertEqual(app.grade(63,app.GRADING),40)
     def test_single_respondent_consensus_is_not_calculable(self):
-        t=self.db.execute('select id,version from templates').fetchone(); sid='solo-session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
+        t=self.db.execute('select id,version from templates where is_canonical=1').fetchone(); sid='solo-session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         self.db.execute('insert into participants (id,session_id,anonymous_id,status,started_at,completed_at,display_name) values(?,?,?,?,?,?,?)',('solo',sid,'solo','completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,'solo',inds,'4','numeric',app.now(),app.now()))
         self.db.commit(); out=app.analysis(self.db,sid); indicator=out['domains'][0]['indicators'][0]; domain_out=out['domains'][0]
@@ -35,7 +35,7 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(domain_out['consensus']); self.assertEqual(domain_out['consensusNote'],'single_respondent')
         self.assertIsNone(out['global']['consensus']); self.assertEqual(out['global']['consensusNote'],'single_respondent')
     def test_qualitative_chain_is_persistent_and_exported(self):
-        t=self.db.execute('select id,version from templates').fetchone(); sid='qualitative-session'
+        t=self.db.execute('select id,version from templates where is_canonical=1').fetchone(); sid='qualitative-session'
         self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; indicator=self.db.execute('select id from indicators where domain_id=? limit 1',(domain,)).fetchone()['id']
         self.db.execute('insert into priorities values(?,?,?,?,?,?)',('priority',sid,domain,indicator,1,app.now()))
@@ -50,13 +50,13 @@ class EngineTests(unittest.TestCase):
     # --- Régression : versionnement du questionnaire par mission (recette 2026-08-17) ---
 
     def test_is_canonical_flag_identifies_only_the_true_reference(self):
-        t = self.db.execute('select id from templates').fetchone()['id']
+        t = self.db.execute('select id from templates where is_canonical=1').fetchone()['id']
         self.assertTrue(app.is_canonical_template(self.db, t))
         fork = app.clone_template(self.db, t, status="session_locked")
         self.assertFalse(app.is_canonical_template(self.db, fork))
 
     def test_canonical_reference_structural_edit_is_refused(self):
-        t = self.db.execute('select id from templates').fetchone()['id']
+        t = self.db.execute('select id from templates where is_canonical=1').fetchone()['id']
         with self.assertRaises(app.StructuralEditForbiddenError):
             app.guard_structural_edit(self.db, t, "add")
         with self.assertRaises(app.StructuralEditForbiddenError):
@@ -66,7 +66,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(sum(len(d['indicators']) for d in payload['domains']), 70)
 
     def test_private_fork_is_freely_editable(self):
-        t = self.db.execute('select id from templates').fetchone()['id']
+        t = self.db.execute('select id from templates where is_canonical=1').fetchone()['id']
         fork = app.clone_template(self.db, t, status="session_locked")
         app.guard_structural_edit(self.db, fork, "add")  # must not raise
         did = str(uuid.uuid4())
@@ -76,7 +76,7 @@ class EngineTests(unittest.TestCase):
 
     def test_ensure_private_template_forks_and_remaps_historical_responses(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid_a, sid_b = 'mission-a', 'mission-b'
         self._mk_session(sid_a, template=t); self._mk_session(sid_b, template=t)
         domain = db.execute('select id from domains where display_order=1').fetchone()['id']
@@ -108,7 +108,7 @@ class EngineTests(unittest.TestCase):
 
     def test_responses_survive_structural_edit_from_another_mission(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid_a, sid_b = 'mission-a', 'mission-b'
         self._mk_session(sid_a, template=t); self._mk_session(sid_b, template=t)
         pid_a = 'participant-a'
@@ -142,7 +142,7 @@ class EngineTests(unittest.TestCase):
 
     def test_five_missions_keep_isolated_questionnaire_versions_after_independent_edits(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         missions = []
         for n in range(5):
             sid = f'mission-{n}'
@@ -215,7 +215,7 @@ class EngineTests(unittest.TestCase):
     # --- Régression : cycle de vie des questionnaires (correctif 2026-08-17) ---
 
     def test_canonical_edit_and_delete_are_refused(self):
-        t = self.db.execute('select id from templates').fetchone()['id']
+        t = self.db.execute('select id from templates where is_canonical=1').fetchone()['id']
         with self.assertRaises(app.StructuralEditForbiddenError):
             app.guard_structural_edit(self.db, t, "edit")
         with self.assertRaises(app.StructuralEditForbiddenError):
@@ -226,7 +226,7 @@ class EngineTests(unittest.TestCase):
 
     def test_editing_own_private_fork_does_not_clone(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid = 'mission-edit'
         self._mk_session(sid, template=t)
         self._mk_participant(sid, 'p1')
@@ -245,7 +245,7 @@ class EngineTests(unittest.TestCase):
 
     def test_delete_session_drops_exclusive_private_fork_but_keeps_canonical_and_shared(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         canonical_id = t['id']
         sid_a, sid_b = 'mission-del-a', 'mission-del-b'
         self._mk_session(sid_a, template=t); self._mk_session(sid_b, template=t)
@@ -274,7 +274,7 @@ class EngineTests(unittest.TestCase):
 
     def test_delete_session_never_drops_the_canonical_even_if_still_directly_referenced(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         canonical_id = t['id']
         sid = 'mission-no-fork-yet'
         self._mk_session(sid, template=t)  # no participant yet: still points straight at canonical
@@ -287,7 +287,7 @@ class EngineTests(unittest.TestCase):
 
     def test_delete_session_never_drops_a_template_still_used_by_another_session(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         fork = app.clone_template(db, t['id'], status='session_locked')
         db.commit()
         sid_a, sid_b = 'mission-shared-a', 'mission-shared-b'
@@ -301,7 +301,7 @@ class EngineTests(unittest.TestCase):
 
     def test_delete_session_never_drops_an_active_library_template(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         library = app.clone_template(db, t['id'], status='active')
         db.commit()
         sid = 'mission-library'
@@ -312,7 +312,7 @@ class EngineTests(unittest.TestCase):
         self.assertIsNotNone(db.execute('select id from templates where id=?', (library,)).fetchone())
 
     def test_analysis_computes_graded_values_per_indicator(self):
-        t=self.db.execute('select id,version from templates').fetchone(); sid='session-graded'
+        t=self.db.execute('select id,version from templates where is_canonical=1').fetchone(); sid='session-graded'
         self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         for n,v in [('a',1),('b',5)]:
@@ -323,7 +323,7 @@ class EngineTests(unittest.TestCase):
 
     def test_individual_responses_rows_scoped_and_anonymous_safe(self):
         db=self.db
-        t=db.execute('select id,version from templates').fetchone()
+        t=db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid_a,sid_b='ind-resp-a','ind-resp-b'
         self._mk_session(sid_a,template=t); self._mk_session(sid_b,template=t)
         domain=db.execute('select id from domains where template_id=? order by display_order limit 1',(t['id'],)).fetchone()['id']
@@ -380,7 +380,7 @@ class EngineTests(unittest.TestCase):
 
     def test_filtered_analysis_matches_consignes_math_example(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid = 'filter-math-session'
         self._mk_session(sid, template=t)
         domain = db.execute('select id from domains where display_order=1').fetchone()['id']
@@ -424,7 +424,7 @@ class EngineTests(unittest.TestCase):
 
     def test_analysis_combines_multiple_filters_with_and(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid = 'combined-filter-session'
         self._mk_session(sid, template=t)
         domain = db.execute('select id from domains where display_order=1').fetchone()['id']
@@ -439,7 +439,7 @@ class EngineTests(unittest.TestCase):
 
     def test_analysis_filter_never_leaks_across_sessions(self):
         db = self.db
-        t = db.execute('select id,version from templates').fetchone()
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
         sid_a, sid_b = 'iso-a', 'iso-b'
         self._mk_session(sid_a, template=t); self._mk_session(sid_b, template=t)
         domain = db.execute('select id from domains where display_order=1').fetchone()['id']
@@ -493,5 +493,43 @@ class EngineTests(unittest.TestCase):
         db.commit()
         a_default = app.analysis(db, sid); a_none = app.analysis(db, sid, None); a_empty = app.analysis(db, sid, {})
         self.assertEqual(a_default, a_none); self.assertEqual(a_default, a_empty)
+
+    def test_epc_35_template_is_created_alongside_canonical_and_is_idempotent(self):
+        db = self.db
+        row = db.execute("select * from templates where name=?", (app.EPC_35_TEMPLATE_NAME,)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['is_canonical'], 0)
+        payload = app.template_payload(db, row['id'])
+        self.assertEqual(len(payload['domains']), 7)
+        self.assertEqual(sum(len(d['indicators']) for d in payload['domains']), 35)
+        for d in payload['domains']:
+            self.assertEqual(len(d['indicators']), 5)
+        all_codes = [i['code'] for d in payload['domains'] for i in d['indicators']]
+        self.assertEqual(all_codes, [str(n) for n in range(1, 36)])
+        # the canonical 7x70 referential is untouched by the new template's presence
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        canonical_payload = app.template_payload(db, canonical)
+        self.assertEqual(sum(len(d['indicators']) for d in canonical_payload['domains']), 70)
+        # idempotent: calling it again does not create a duplicate row
+        before = db.execute('select count(*) from templates').fetchone()[0]
+        app.ensure_epc_35_template(db)
+        after = db.execute('select count(*) from templates').fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_epc_35_template_owner_is_mouhba_when_account_exists(self):
+        # Fresh, isolated DB: the users row must exist before init_db() runs
+        # ensure_epc_35_template(), mirroring real startup timing.
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db = app.connect(Path(tmp.name) / 'owner-test.sqlite3')
+            app.init_schema(db)
+            db.execute("insert into users values(?,?,?,?,?,?,?)", ('pilote-1', 'mouhba@local', 'x', 'y', 'pilote', 'Pilote', app.now()))
+            db.commit()
+            app.ensure_epc_35_template(db)
+            row = db.execute("select owner_user_id from templates where name=?", (app.EPC_35_TEMPLATE_NAME,)).fetchone()
+            self.assertEqual(row['owner_user_id'], 'pilote-1')
+            db.close()
+        finally:
+            tmp.cleanup()
 
 if __name__=='__main__': unittest.main()
