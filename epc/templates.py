@@ -66,7 +66,7 @@ def matrix_xlsx(template):
     if not template["domains"]: ws.write_row(row,0,["EXEMPLE — Gestion des Ressources Humaines","EXEMPLE — Formation au personnel","EXEMPLE — Nous offrons régulièrement la formation au personnel"],wrap); row+=1
     for d in template["domains"]:
         for i in d["indicators"]:
-            ws.write_row(row,0,[d["label"],i["label"],i["description"]],wrap); row+=1
+            ws.write_row(row,0,[d["label"],i["code"],i["label"]],wrap); row+=1
     ws.set_column(0,0,34); ws.set_column(1,1,38); ws.set_column(2,2,75); wb.close(); return out.getvalue()
 
 
@@ -112,7 +112,11 @@ def import_preview(raw):
             if not any(r) or r[0].startswith("EXEMPLE"): continue
             if not all(r): errors.append("Chaque ligne doit contenir Domaine, Référence et Indicateur qualitatif ou Capacité"); continue
             if r[0] not in grouped: grouped[r[0]]=[]; order.append(r[0])
-            grouped[r[0]].append({"code":"","label":r[1],"description":r[2],"response_type":"numeric","required":True,"active":True,"display_order":len(grouped[r[0]])})
+            # r[1] is the "Référence" column (short code, e.g. EPC's indicators.code)
+            # and r[2] the "Indicateur qualitatif ou Capacité" column (the actual
+            # question statement shown to participants, e.g. EPC's indicators.label)
+            # - matches matrix_xlsx()'s writer and the EXEMPLE row's own labelling.
+            grouped[r[0]].append({"code":r[1],"label":r[2],"description":"","response_type":"numeric","required":True,"active":True,"display_order":len(grouped[r[0]])})
         # matrix_xlsx() labels the PARAMETRES name cell "Nom du questionnaire (à
         # remplacer par le vôtre)" (an in-sheet instruction, not to be edited by the
         # user - see MODE D'EMPLOI); accept that key too so a workbook downloaded via

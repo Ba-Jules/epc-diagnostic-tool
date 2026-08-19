@@ -330,27 +330,52 @@ class EngineTests(unittest.TestCase):
         xlsx_bytes=app.matrix_xlsx(app.template_payload(self.db,t))
         self.assertGreater(len(xlsx_bytes),1000)
 
+    def test_real_epc_questionnaire_matrix_roundtrips_cleanly(self):
+        # The scenario that surfaced both fixed bugs: exporting the real EPC/SENEVAL
+        # questionnaire (whose indicators have a non-empty code/label and an always-
+        # empty description, see seed_epc) and re-importing it unedited must now work
+        # with zero errors and all 70 indicators recovered.
+        t=self.db.execute('select id from templates').fetchone()['id']
+        template=app.template_payload(self.db,t)
+        preview=app.import_preview(app.matrix_xlsx(template))
+        self.assertEqual(preview['errors'],[])
+        self.assertEqual(preview['rows'],70)
+        first=preview['template']['domains'][0]['indicators'][0]
+        self.assertEqual(first['code'],'Formation au personnel')
+        self.assertEqual(first['label'],'Nous offrons régulièrement la formation au personnel')
+
     def test_matrix_xlsx_roundtrips_through_import_preview(self):
-        # Fixed bug (see epc/templates.py import_preview): matrix_xlsx() labels the
-        # PARAMETRES name cell "Nom du questionnaire (à remplacer par le vôtre)" (an
-        # in-sheet instruction) - import_preview() now accepts that key too, so a
-        # workbook downloaded via matrix_xlsx() can be re-imported unedited.
+        # Fixed bugs (see epc/templates.py matrix_xlsx/import_preview):
+        # 1) matrix_xlsx() labels the PARAMETRES name cell "Nom du questionnaire
+        #    (à remplacer par le vôtre)" (an in-sheet instruction) - import_preview()
+        #    now accepts that key too, so a workbook downloaded via matrix_xlsx() can
+        #    be re-imported unedited.
+        # 2) matrix_xlsx()'s QUESTIONNAIRE sheet writes code -> "Référence" and
+        #    label (the actual question statement) -> "Indicateur qualitatif ou
+        #    Capacité", matching the EXEMPLE row's own semantics and the EPC
+        #    code/label split (indicators.code/indicators.label). import_preview()
+        #    reads them back the same way, so the participant-facing question ends
+        #    up in "label" again (not the short reference).
         template={'name':'Modele export-import','description':'','version':1,
             'scale':{'type':'numeric','min':1,'max':5,'labels':{}},'priority':{'maxPerDomain':3},
             'domains':[{'label':'Domaine A','indicators':[
-                {'label':'Q1','description':'Premiere question'},
-                {'label':'Q2','description':'Deuxieme question'},
+                {'code':'Q1','label':'Premiere question complete'},
+                {'code':'Q2','label':'Deuxieme question complete'},
             ]}]}
         preview=app.import_preview(app.matrix_xlsx(template))
         self.assertEqual(preview['errors'],[])
         self.assertEqual(preview['template']['name'],'Modele export-import')
         self.assertEqual(preview['rows'],2)
+        indicators=preview['template']['domains'][0]['indicators']
+        self.assertEqual(indicators[0]['code'],'Q1')
+        self.assertEqual(indicators[0]['label'],'Premiere question complete')
 
     def _questionnaire_xlsx(self,name='Modele test import',rows=(('Domaine A','Q1','Premiere question'),('Domaine A','Q2','Deuxieme question'))):
         # Built directly with xlsxwriter (not via app.matrix_xlsx) so this test targets
         # import_preview()/save_import() in isolation with a plain "Nom du questionnaire"
         # PARAMETRES key (a hand-built workbook, as opposed to one downloaded via
         # app.matrix_xlsx() - see test_matrix_xlsx_roundtrips_through_import_preview).
+        # rows are (Domaine, Référence=code, Indicateur qualitatif ou Capacité=label).
         out=BytesIO(); wb=xlsxwriter.Workbook(out,{'in_memory':True})
         ps=wb.add_worksheet('PARAMETRES'); ps.write_row(0,0,['Nom du questionnaire',name]); ps.write_row(1,0,['Description',''])
         qs=wb.add_worksheet('QUESTIONNAIRE'); qs.write_row(0,0,['Domaine','Référence','Indicateur qualitatif ou Capacité'])
@@ -363,6 +388,9 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(preview['template']['name'],'Modele test import')
         self.assertEqual(preview['rows'],2)
         self.assertEqual(len(preview['template']['domains']),1)
+        indicators=preview['template']['domains'][0]['indicators']
+        self.assertEqual(indicators[0]['code'],'Q1')
+        self.assertEqual(indicators[0]['label'],'Premiere question')
 
     def test_save_import_persists_domains_and_indicators(self):
         preview=app.import_preview(self._questionnaire_xlsx())
@@ -371,6 +399,8 @@ class EngineTests(unittest.TestCase):
         payload=app.template_payload(self.db,new_id)
         self.assertEqual(payload['name'],'Modele test import')
         self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),preview['rows'])
+        indicator=payload['domains'][0]['indicators'][0]
+        self.assertEqual(indicator['code'],'Q1'); self.assertEqual(indicator['label'],'Premiere question')
 
     # --- Lot 1e (modularisation) : collecte participant extraite vers epc/collecte.py ---
 
