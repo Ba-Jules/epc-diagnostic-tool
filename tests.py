@@ -1,7 +1,9 @@
 import tempfile
 import uuid
 import unittest
+from io import BytesIO
 from pathlib import Path
+import xlsxwriter
 import app
 
 class EngineTests(unittest.TestCase):
@@ -302,5 +304,60 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(user['id'],uidA)
         with self.assertRaises(app.PermissionDeniedError):
             app.resolve_auth('/api/campaigns/cmp-owned-c','GET',self.db,f'epc_session={tokenB}')
+
+    # --- Lot 1c (modularisation) : clonage/creation/import de questionnaires extraits vers epc/templates.py ---
+
+    def test_clone_template_creates_new_version_with_same_content(self):
+        t=self.db.execute('select id from templates').fetchone()['id']
+        new_id=app.clone_template(self.db,t,name='EPC / SENEVAL')
+        self.assertNotEqual(new_id,t)
+        old=app.template_payload(self.db,t); new=app.template_payload(self.db,new_id)
+        self.assertEqual(new['version'],old['version']+1)
+        self.assertEqual(len(new['domains']),len(old['domains']))
+        self.assertEqual(sum(len(d['indicators']) for d in new['domains']),sum(len(d['indicators']) for d in old['domains']))
+
+    def test_create_blank_template_and_next_order_increments(self):
+        tid=app.create_blank_template(self.db,{'name':'Nouveau'},owner_user_id='owner1')
+        self.db.commit()
+        self.assertEqual(app.next_order(self.db,'domains','template_id',tid),1)
+        did=str(uuid.uuid4())
+        self.db.execute("insert into domains values(?,?,?,?,?,?,?)",(did,tid,'d1','Domaine 1','',1,1))
+        self.db.commit()
+        self.assertEqual(app.next_order(self.db,'domains','template_id',tid),2)
+
+    def test_matrix_xlsx_produces_a_sizeable_workbook(self):
+        t=self.db.execute('select id from templates').fetchone()['id']
+        xlsx_bytes=app.matrix_xlsx(app.template_payload(self.db,t))
+        self.assertGreater(len(xlsx_bytes),1000)
+
+    def _questionnaire_xlsx(self,name='Modele test import',rows=(('Domaine A','Q1','Premiere question'),('Domaine A','Q2','Deuxieme question'))):
+        # Built directly with xlsxwriter (not via app.matrix_xlsx) so this test targets
+        # import_preview()/save_import() in isolation, using exactly the PARAMETRES keys
+        # ("Nom du questionnaire", "Description") that import_preview's QUESTIONNAIRE-sheet
+        # path reads. NB: app.matrix_xlsx() itself writes a longer PARAMETRES key ("Nom du
+        # questionnaire (à remplacer par le vôtre)") that import_preview does not recognise,
+        # so a workbook downloaded via matrix_xlsx() cannot be re-imported unedited as-is -
+        # a pre-existing mismatch between the two, unrelated to this refactor (copied
+        # verbatim from app.py into epc/templates.py).
+        out=BytesIO(); wb=xlsxwriter.Workbook(out,{'in_memory':True})
+        ps=wb.add_worksheet('PARAMETRES'); ps.write_row(0,0,['Nom du questionnaire',name]); ps.write_row(1,0,['Description',''])
+        qs=wb.add_worksheet('QUESTIONNAIRE'); qs.write_row(0,0,['Domaine','Référence','Indicateur qualitatif ou Capacité'])
+        for n,r in enumerate(rows,1): qs.write_row(n,0,list(r))
+        wb.close(); return out.getvalue()
+
+    def test_import_preview_reads_valid_questionnaire_workbook(self):
+        preview=app.import_preview(self._questionnaire_xlsx())
+        self.assertEqual(preview['errors'],[])
+        self.assertEqual(preview['template']['name'],'Modele test import')
+        self.assertEqual(preview['rows'],2)
+        self.assertEqual(len(preview['template']['domains']),1)
+
+    def test_save_import_persists_domains_and_indicators(self):
+        preview=app.import_preview(self._questionnaire_xlsx())
+        new_id=app.save_import(self.db,preview,owner_user_id='owner2')
+        self.db.commit()
+        payload=app.template_payload(self.db,new_id)
+        self.assertEqual(payload['name'],'Modele test import')
+        self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),preview['rows'])
 
 if __name__=='__main__': unittest.main()
