@@ -378,4 +378,120 @@ class EngineTests(unittest.TestCase):
         self.assertIn('{count}',app.DOMAIN_FROZEN_MESSAGE); self.assertIn('{names}',app.DOMAIN_FROZEN_MESSAGE)
         self.assertIn('{count}',app.INDICATOR_FROZEN_MESSAGE)
 
+    def test_filtered_analysis_matches_consignes_math_example(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        sid = 'filter-math-session'
+        self._mk_session(sid, template=t)
+        domain = db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator = db.execute('select id from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['id']
+        for pid, val in [('h1', 5), ('h2', 5), ('h3', 4), ('h4', 4)]:
+            self._mk_participant(sid, pid, status='completed'); db.execute("UPDATE participants SET sex=? WHERE id=?", ('Homme', pid))
+            db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, pid, indicator, str(val), 'numeric', app.now(), app.now()))
+        for pid, val in [('f1', 1), ('f2', 1), ('f3', 2), ('f4', 2)]:
+            self._mk_participant(sid, pid, status='completed'); db.execute("UPDATE participants SET sex=? WHERE id=?", ('Femme', pid))
+            db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, pid, indicator, str(val), 'numeric', app.now(), app.now()))
+        db.commit()
+
+        hommes = app.analysis(db, sid, {'sex': 'Homme'})
+        self.assertEqual(hommes['completedCount'], 4)
+        self.assertEqual(hommes['global']['capacity'], 90)
+        self.assertAlmostEqual(hommes['global']['consensus'], 71.13, delta=0.1)
+        self.assertEqual(hommes['global']['gradedCapacity'], 85)
+        self.assertEqual(hommes['global']['gradedConsensus'], 50)
+
+        femmes = app.analysis(db, sid, {'sex': 'Femme'})
+        self.assertEqual(femmes['completedCount'], 4)
+        self.assertEqual(femmes['global']['capacity'], 30)
+        self.assertAlmostEqual(femmes['global']['consensus'], 71.13, delta=0.1)
+        self.assertEqual(femmes['global']['gradedCapacity'], 10)
+        self.assertEqual(femmes['global']['gradedConsensus'], 50)
+
+        tous = app.analysis(db, sid, None)
+        self.assertEqual(tous['completedCount'], 8)
+        self.assertEqual(tous['global']['capacity'], 60)
+        self.assertAlmostEqual(tous['global']['consensus'], 15.49, delta=0.1)
+        # The critical assertion: pooling the 8 individual responses gives a very
+        # different number from averaging the two sub-group consensus values —
+        # confirms "Tous" recomputes from raw responses, never from sub-averages.
+        self.assertNotAlmostEqual(tous['global']['consensus'], 71.13, delta=5)
+
+        compare = app.compare_population(db, sid, 'sex')
+        by_value = {c['value']: c for c in compare}
+        self.assertEqual(set(by_value), {'Homme', 'Femme'})
+        self.assertEqual(by_value['Homme']['capacity'], 90)
+        self.assertEqual(by_value['Femme']['capacity'], 30)
+
+    def test_analysis_combines_multiple_filters_with_and(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        sid = 'combined-filter-session'
+        self._mk_session(sid, template=t)
+        domain = db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator = db.execute('select id from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['id']
+        for pid, sex, profile, val in [('p1', 'Homme', 'ONG', 4), ('p2', 'Homme', 'Administration', 2), ('p3', 'Femme', 'ONG', 5)]:
+            self._mk_participant(sid, pid, status='completed'); db.execute("UPDATE participants SET sex=?,profile=? WHERE id=?", (sex, profile, pid))
+            db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, pid, indicator, str(val), 'numeric', app.now(), app.now()))
+        db.commit()
+        combined = app.analysis(db, sid, {'sex': 'Homme', 'profile': 'ONG'})
+        self.assertEqual(combined['completedCount'], 1)
+        self.assertEqual(combined['global']['capacity'], 80)
+
+    def test_analysis_filter_never_leaks_across_sessions(self):
+        db = self.db
+        t = db.execute('select id,version from templates').fetchone()
+        sid_a, sid_b = 'iso-a', 'iso-b'
+        self._mk_session(sid_a, template=t); self._mk_session(sid_b, template=t)
+        domain = db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator = db.execute('select id from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['id']
+        self._mk_participant(sid_a, 'a1', status='completed'); db.execute("UPDATE participants SET sex=? WHERE id=?", ('Homme', 'a1'))
+        db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid_a, 'a1', indicator, '5', 'numeric', app.now(), app.now()))
+        self._mk_participant(sid_b, 'b1', status='completed'); db.execute("UPDATE participants SET sex=? WHERE id=?", ('Homme', 'b1'))
+        db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid_b, 'b1', indicator, '1', 'numeric', app.now(), app.now()))
+        db.commit()
+        a = app.analysis(db, sid_a, {'sex': 'Homme'})
+        self.assertEqual(a['completedCount'], 1); self.assertEqual(a['global']['capacity'], 100)
+        cats = app.compare_population(db, sid_a, 'sex')
+        self.assertEqual(len(cats), 1); self.assertEqual(cats[0]['N'], 1); self.assertEqual(cats[0]['capacity'], 100)
+        # A category with 0 respondents (nothing set on sid_b's participant beyond
+        # 'Homme') never appears — never shown at N=0.
+        cats_b = app.compare_population(db, sid_b, 'profile')
+        self.assertEqual(cats_b, [])
+
+    def test_objective_findings_thresholds(self):
+        result = {"domains": [
+            {"id": "d1", "label": "Fort", "capacity": 85, "consensus": 80, "indicators": []},
+            {"id": "d2", "label": "Faible", "capacity": 40, "consensus": 50, "indicators": []},
+            {"id": "d3", "label": "Vigilance", "capacity": 75, "consensus": 30, "indicators": []},
+        ]}
+        findings = app.objective_findings(result)
+        # d3 (capacity 75) legitimately qualifies as BOTH a force (high capacity)
+        # and a vigilance point (that capacity isn't backed by consensus) — the two
+        # categories are independent readings, not mutually exclusive.
+        self.assertEqual(sorted(d['id'] for d in findings['forces']['domains']), ['d1', 'd3'])
+        self.assertEqual([d['id'] for d in findings['fragilites']['domains']], ['d2'])
+        self.assertEqual([v['id'] for v in findings['vigilance']], ['d3'])
+        self.assertEqual(findings['vigilance'][0]['reason'], 'capacite_elevee_consensus_faible')
+
+    def test_objective_findings_flags_large_subpopulation_gap(self):
+        result = {"domains": [{"id": "d1", "label": "D1", "capacity": 50, "consensus": 65, "indicators": []}]}
+        comparison = [
+            {"value": "Homme", "domains": [{"id": "d1", "label": "D1", "capacity": 80}]},
+            {"value": "Femme", "domains": [{"id": "d1", "label": "D1", "capacity": 20}]},
+        ]
+        findings = app.objective_findings(result, comparison=comparison)
+        gaps = [v for v in findings['vigilance'] if v['reason'] == 'ecart_sous_populations']
+        self.assertEqual(len(gaps), 1); self.assertEqual(gaps[0]['gap'], 60)
+
+    def test_analysis_unfiltered_call_forms_are_identical(self):
+        db = self.db
+        sid = 'noop-filter-session'
+        self._mk_session(sid); self._mk_participant(sid, 'p1', status='completed')
+        domain = db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator = db.execute('select id from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['id']
+        db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, 'p1', indicator, '4', 'numeric', app.now(), app.now()))
+        db.commit()
+        a_default = app.analysis(db, sid); a_none = app.analysis(db, sid, None); a_empty = app.analysis(db, sid, {})
+        self.assertEqual(a_default, a_none); self.assertEqual(a_default, a_empty)
+
 if __name__=='__main__': unittest.main()

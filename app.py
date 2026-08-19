@@ -386,12 +386,13 @@ def _parse_json_list(text):
 
 
 AI_SECTION_LABELS = {
-    "resume_executif": "Résumé exécutif", "lecture_diagnostic": "Lecture du diagnostic",
+    "synthese_finale": "Synthèse finale", "resume_executif": "Résumé exécutif", "lecture_diagnostic": "Lecture du diagnostic",
     "synthese_domaines": "Synthèse par domaine", "synthese_priorites": "Synthèse des priorités",
     "synthese_recommandations": "Synthèse des recommandations", "synthese_formations": "Synthèse des besoins de formation",
     "synthese_plan": "Synthèse du plan d'action", "conclusion": "Conclusion générale proposée",
 }
 AI_REPORT_SECTIONS = {
+    "synthese_finale": "Rédige une SYNTHÈSE FINALE structurée de l'atelier : participation, diagnostic (capacité/consensus/gradués), forces, fragilités et points de vigilance, priorités retenues, analyses (constats/causes/conséquences/leviers), recommandations retenues, besoins de formation — à partir uniquement des données fournies, sans jamais recalculer un score.",
     "resume_executif": "Rédige un RÉSUMÉ EXÉCUTIF de l'atelier : situation générale, principaux constats, points forts, points de vigilance, priorités retenues, principales orientations.",
     "lecture_diagnostic": "Rédige une LECTURE DU DIAGNOSTIC : tendances, écarts, convergences, divergences, domaines remarquables, à partir de la capacité et du consensus.",
     "synthese_domaines": "Rédige une SYNTHÈSE PAR DOMAINE : pour chaque domaine, résultat et interprétation prudente, en lien avec les analyses validées si disponibles.",
@@ -884,10 +885,70 @@ def individual_responses_csv(db, session_id: str):
     return buf.getvalue().encode()
 
 
+PARTICIPANT_FILTER_LABELS = {"participant_type": "Type de participant", "profile": "Profil", "sex": "Sexe", "age_range": "Tranche d'âge", "education_level": "Niveau de scolarisation"}
+
+
+def filtered_analysis_rows(db, session_id: str, participant_filter):
+    """Header block (mission/filtres actifs/N) + domain table + indicator table for
+    the filtered-analysis export — distinct from individual_responses_rows (raw
+    per-participant answers)."""
+    a = analysis(db, session_id, participant_filter)
+    filt_desc = "; ".join(f"{PARTICIPANT_FILTER_LABELS[col]}={val}" for col, val in (participant_filter or {}).items()) or "Tous les participants"
+    header = [["Mission", a["session"]["name"]], ["Filtres actifs", filt_desc], ["N (validés)", a["completedCount"]]]
+    domain_rows = [[d["label"], d["capacity"], _c(d), d["gradedCapacity"], d["gradedConsensus"], d["responses"]] for d in a["domains"]]
+    indicator_rows = [[d["label"], i["label"], i["capacity"], _c(i), i["responses"], i["missing"]] for d in a["domains"] for i in d["indicators"]]
+    return header, domain_rows, indicator_rows
+
+
+def filtered_analysis_xlsx(db, session_id: str, participant_filter):
+    header, domain_rows, indicator_rows = filtered_analysis_rows(db, session_id, participant_filter)
+    out = BytesIO(); wb = xlsxwriter.Workbook(out, {"in_memory": True}); h = wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF"})
+    s = wb.add_worksheet("Filtre"); [s.write_row(n, 0, row) for n, row in enumerate(header)]; s.set_column(0, 1, 30)
+    d = wb.add_worksheet("Domaines"); d.write_row(0, 0, ["Domaine", "Capacité", "Consensus", "Cap. graduée", "Cons. gradué", "Réponses"], h); [d.write_row(n + 1, 0, row) for n, row in enumerate(domain_rows)]; d.set_column(0, 5, 22)
+    i = wb.add_worksheet("Indicateurs"); i.write_row(0, 0, ["Domaine", "Référence", "Capacité", "Consensus", "Réponses", "Manquants"], h); [i.write_row(n + 1, 0, row) for n, row in enumerate(indicator_rows)]; i.set_column(0, 5, 24)
+    wb.close(); return out.getvalue()
+
+
+def filtered_analysis_csv(db, session_id: str, participant_filter):
+    header, domain_rows, indicator_rows = filtered_analysis_rows(db, session_id, participant_filter)
+    buf = StringIO(); writer = csv.writer(buf)
+    for row in header: writer.writerow(row)
+    writer.writerow([]); writer.writerow(["Domaine", "Capacité", "Consensus", "Cap. graduée", "Cons. gradué", "Réponses"])
+    for row in domain_rows: writer.writerow(row)
+    writer.writerow([]); writer.writerow(["Domaine", "Référence", "Capacité", "Consensus", "Réponses", "Manquants"])
+    for row in indicator_rows: writer.writerow(row)
+    return buf.getvalue().encode()
+
+
+def participant_profile_breakdown(db, session_id: str):
+    """Count of validated participants per value, for each of the 5 fixed profile
+    fields — blank/NULL excluded (never invented as a fake 'non renseigné' count)."""
+    out = []
+    for col, label in PARTICIPANT_FILTER_LABELS.items():
+        for r in rows(db, f"SELECT {col} AS v, COUNT(*) AS n FROM participants WHERE session_id=? AND status='completed' AND {col} IS NOT NULL AND {col}!='' GROUP BY {col} ORDER BY n DESC", (session_id,)):
+            out.append([label, r["v"], r["n"]])
+    return out
+
+
+def findings_rows(findings):
+    """Flatten objective_findings()'s dict into plain rows for XLSX/DOCX/report display."""
+    rows_out = []
+    for d in findings["forces"]["domains"]: rows_out.append(["Force", "Domaine", d["label"], d["capacity"], d["consensus"]])
+    for i in findings["forces"]["indicators"]: rows_out.append(["Force", "Indicateur", f"{i['domain']} — {i['label']}", i["capacity"], i["consensus"]])
+    for d in findings["fragilites"]["domains"]: rows_out.append(["Fragilité", "Domaine", d["label"], d["capacity"], d["consensus"]])
+    for i in findings["fragilites"]["indicators"]: rows_out.append(["Fragilité", "Indicateur", f"{i['domain']} — {i['label']}", i["capacity"], i["consensus"]])
+    for v in findings["vigilance"]:
+        if v["reason"] == "ecart_sous_populations":
+            rows_out.append(["Vigilance", "Écart entre sous-populations", v["label"], v.get("gap"), ""])
+        else:
+            rows_out.append(["Vigilance", "Domaine", v["label"], v.get("capacity"), v.get("consensus")])
+    return rows_out
+
+
 def report_xlsx(db,sid):
     a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})
     analyses={x['priority_id']:x for x in q['analyses']}; priority_rows=[[p['id'],p['domain_label'],p['indicator_code'],p['indicator_label'],analyses.get(p['id'],{}).get('problem','')] for p in q['priorities']]
-    sheets=[("Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
+    sheets=[("Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("Profil_participants",["Champ","Valeur","N"],participant_profile_breakdown(db,sid)),("Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("Constats",["Type","Niveau","Libellé","Capacité","Consensus"],findings_rows(a['findings'])),("Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
     for name,head,data in sheets:
         s=wb.add_worksheet(name);s.write_row(0,0,head,h);[s.write_row(n+1,0,row) for n,row in enumerate(data)];s.set_column(0,len(head)-1,24)
     ai_blocks=rows(db,"SELECT section_key,content FROM report_ai_blocks WHERE session_id=?",(sid,))
@@ -1357,6 +1418,32 @@ def report_docx(db, sid):
         ("Consensus gradué", pdf_fmt(g["gradedConsensus"])),
     ])
 
+    profile_breakdown = participant_profile_breakdown(db, sid)
+    if profile_breakdown:
+        docx_style_heading(doc.add_heading("Profil des participants", level=2))
+        pt = doc.add_table(rows=1, cols=3)
+        for c, x in zip(pt.rows[0].cells, ["Champ", "Valeur", "N"]):
+            c.text = x
+        for field, value, n in profile_breakdown:
+            row = pt.add_row().cells
+            for c, v in zip(row, [field, value, n]):
+                c.text = str(v)
+        docx_style_table(pt)
+
+    def add_findings_section():
+        rows_ = findings_rows(a["findings"])
+        if not rows_: return
+        docx_style_heading(doc.add_heading("Forces / Fragilités / Points de vigilance", level=2))
+        docx_note(doc, "Constats chiffrés issus des données ci-dessus — jamais présentés comme des causes.", italic=True)
+        ft = doc.add_table(rows=1, cols=5)
+        for c, x in zip(ft.rows[0].cells, ["Type", "Niveau", "Libellé", "Capacité", "Consensus"]):
+            c.text = x
+        for row_data in rows_:
+            row = ft.add_row().cells
+            for c, v in zip(row, row_data):
+                c.text = "" if v is None else str(v)
+        docx_style_table(ft)
+
     if not domains or PILImage is None:
         docx_style_heading(doc.add_heading("Synthèse par domaine", level=2))
         t = doc.add_table(rows=1, cols=6)
@@ -1372,6 +1459,7 @@ def report_docx(db, sid):
             doc.add_paragraph("Pas encore de données suffisantes pour la restitution graphique EPC.")
         elif PILImage is None:
             doc.add_paragraph("Graphiques indisponibles : le paquet optionnel Pillow n'est pas installé (voir README.md).")
+        add_findings_section()
         docx_style_heading(doc.add_heading("Priorités retenues", level=2))
         doc.add_paragraph(f"{len(priorities)} priorité(s) sélectionnée(s)." if priorities else "Aucune priorité sélectionnée.")
         out = BytesIO(); doc.save(out); return out.getvalue()
@@ -1400,6 +1488,8 @@ def report_docx(db, sid):
         for c, v in zip(row, [d["label"], pdf_fmt(d["capacity"]), pdf_c(d), graded, pdf_level(d["capacity"]), d["responses"]]):
             c.text = str(v)
     docx_style_table(t)
+
+    add_findings_section()
 
     docx_style_heading(doc.add_heading("Priorités retenues", level=2))
     doc.add_paragraph(f"{len(priorities)} priorité(s) sélectionnée(s)." if priorities else "Aucune priorité sélectionnée.")
@@ -1538,12 +1628,79 @@ def grade(value, norm):
     return None
 
 
-def analysis(db, session_id: str):
+# Query-param key (camelCase, matches PARTICIPANT_PROFILE_FIELDS in static/app.js) -> participants column.
+PARTICIPANT_FILTER_FIELDS = {"participantType": "participant_type", "profile": "profile", "sex": "sex", "ageRange": "age_range", "educationLevel": "education_level"}
+
+FORCE_THRESHOLD = 71  # matches the "Au-dessus de la moyenne" band floor already used by level() (static/app.js)
+FRAGILE_THRESHOLD = 60  # matches the "Moyen" band floor
+VIGILANCE_GAP_THRESHOLD = 15  # capacity-point gap between sub-populations flagged as a point de vigilance
+
+
+def _participant_filter_sql(participant_filter):
+    """Build an ' AND p.<col>=? AND ...' fragment (+ matching params) from a
+    {db_column: value} dict. Empty/None input returns ("", []) so callers get
+    byte-identical SQL to the unfiltered path — this is what guarantees "Tous
+    les participants" stays strictly unchanged."""
+    if not participant_filter:
+        return "", []
+    frag = "".join(f" AND p.{col}=?" for col in participant_filter)
+    return frag, list(participant_filter.values())
+
+
+def objective_findings(result, comparison=None):
+    """Deterministic, non-AI findings from an already-computed analysis() result:
+    forces (highest capacity), fragilités (lowest capacity), points de vigilance
+    (capacity/consensus disagree, or — when `comparison` categories are given — a
+    large capacity gap between sub-populations on the same domain). Every item
+    carries the numbers that justify it; this is a reading of the data, never a
+    claimed cause."""
+    domains = [d for d in result["domains"] if d["capacity"] is not None]
+    indicators = [dict(i, domain=d["label"]) for d in result["domains"] for i in d["indicators"] if i["capacity"] is not None]
+
+    forces_domains = sorted([d for d in domains if d["capacity"] >= FORCE_THRESHOLD], key=lambda d: -d["capacity"])[:3]
+    forces_indicators = sorted([i for i in indicators if i["capacity"] >= FORCE_THRESHOLD], key=lambda i: -i["capacity"])[:5]
+    fragile_domains = sorted([d for d in domains if d["capacity"] < FRAGILE_THRESHOLD], key=lambda d: d["capacity"])[:3]
+    fragile_indicators = sorted([i for i in indicators if i["capacity"] < FRAGILE_THRESHOLD], key=lambda i: i["capacity"])[:5]
+
+    vigilance = []
+    for d in domains:
+        if d["consensus"] is None:
+            continue
+        if d["capacity"] >= FORCE_THRESHOLD and d["consensus"] < FRAGILE_THRESHOLD:
+            vigilance.append({"level": "domain", "id": d["id"], "label": d["label"], "capacity": d["capacity"], "consensus": d["consensus"], "reason": "capacite_elevee_consensus_faible"})
+        elif d["capacity"] < FRAGILE_THRESHOLD and d["consensus"] >= FORCE_THRESHOLD:
+            vigilance.append({"level": "domain", "id": d["id"], "label": d["label"], "capacity": d["capacity"], "consensus": d["consensus"], "reason": "capacite_faible_consensus_eleve"})
+
+    if comparison:
+        by_domain = {}
+        for cat in comparison:
+            for d in cat.get("domains", []):
+                if d.get("capacity") is None:
+                    continue
+                by_domain.setdefault(d["id"], {"label": d["label"], "values": []})["values"].append({"category": cat["value"], "capacity": d["capacity"]})
+        for did, info in by_domain.items():
+            caps = [v["capacity"] for v in info["values"]]
+            if len(caps) < 2:
+                continue
+            gap = max(caps) - min(caps)
+            if gap >= VIGILANCE_GAP_THRESHOLD:
+                vigilance.append({"level": "domain", "id": did, "label": info["label"], "reason": "ecart_sous_populations", "gap": gap, "values": info["values"]})
+
+    return {"forces": {"domains": forces_domains, "indicators": forces_indicators}, "fragilites": {"domains": fragile_domains, "indicators": fragile_indicators}, "vigilance": vigilance}
+
+
+def analysis(db, session_id: str, participant_filter=None):
     """Capacité/consensus are computed only from participants with status='completed'
     (a questionnaire opened but abandoned mid-way must never silently shift the
     published score) — participantCount below still counts every participant row
     (started or completed) so "commencés" stays visible separately from
-    "validés"/completedCount."""
+    "validés"/completedCount.
+
+    participant_filter: optional {participants_column: value} dict (e.g.
+    {"sex": "Homme"}) to scope the computation to a sub-population — always
+    recomputed from the matching individual completed responses, never a
+    filter applied after aggregation. None/empty means every participant, and
+    produces byte-identical SQL to the pre-filter version of this function."""
     session = db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     if not session:
         return None
@@ -1551,12 +1708,13 @@ def analysis(db, session_id: str):
     scale, rules, consensus, norm = template["scale"], template["scoring"], template["consensus"], template["grading"]
     low, high, amplitude = float(scale["min"]), float(scale["max"]), float(scale["max"] - scale["min"])
     output_max = float(rules.get("outputRange", [0, 100])[1])
+    filt_sql, filt_params = _participant_filter_sql(participant_filter)
     all_values, output_domains, all_participant_ids = [], [], set()
     for domain in template["domains"]:
         indicators = [i for i in domain["indicators"] if i["active"]]
         output_indicators, participant_means = [], {}
         for indicator in indicators:
-            response_rows = rows(db, "SELECT r.participant_id,r.value_json FROM responses r JOIN participants p ON p.id=r.participant_id WHERE r.session_id=? AND r.indicator_id=? AND p.status='completed'", (session_id, indicator["id"]))
+            response_rows = rows(db, "SELECT r.participant_id,r.value_json FROM responses r JOIN participants p ON p.id=r.participant_id WHERE r.session_id=? AND r.indicator_id=? AND p.status='completed'" + filt_sql, (session_id, indicator["id"], *filt_params))
             values = [float(json.loads(r["value_json"])) for r in response_rows if isinstance(json.loads(r["value_json"]), (int, float))]
             for r in response_rows:
                 value = json.loads(r["value_json"])
@@ -1567,7 +1725,8 @@ def analysis(db, session_id: str):
             sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** .5 if len(values) > 1 else None
             capacity = mean / high * output_max if mean is not None else None
             cons = max(0, output_max - consensus["factor"] * (sd / amplitude * output_max)) if sd is not None else None
-            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, len(rows(db, "SELECT id FROM participants WHERE session_id=?", (session_id,))) - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "gradedCapacity": grade(capacity, norm) if capacity is not None else None, "gradedConsensus": grade(cons, norm) if cons is not None else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
+            missing_count = len(rows(db, "SELECT id FROM participants p WHERE p.session_id=?" + filt_sql, (session_id, *filt_params)))
+            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, missing_count - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "gradedCapacity": grade(capacity, norm) if capacity is not None else None, "gradedConsensus": grade(cons, norm) if cons is not None else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
             all_values.extend(values)
         person_scores = [sum(values) / len(values) for values in participant_means.values() if values]
         dmean = sum(person_scores) / len(person_scores) if person_scores else None
@@ -1586,8 +1745,28 @@ def analysis(db, session_id: str):
     graded_caps=[d["gradedCapacity"] for d in output_domains if d["gradedCapacity"] is not None]; graded_cons=[d["gradedConsensus"] for d in output_domains if d["gradedConsensus"] is not None]
     global_graded_capacity=sum(graded_caps)/len(graded_caps) if graded_caps else None
     global_graded_consensus=sum(graded_cons)/len(graded_cons) if graded_cons else None
-    participants=len(rows(db,"SELECT id FROM participants WHERE session_id=?",(session_id,))); completed=len(rows(db,"SELECT id FROM participants WHERE session_id=? AND status='completed'",(session_id,)))
-    return {"session": dict(session), "participantCount": participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "consensusNote": "single_respondent" if len(all_participant_ids) == 1 else None, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
+    participants=len(rows(db,"SELECT id FROM participants p WHERE p.session_id=?"+filt_sql,(session_id,*filt_params))); completed=len(rows(db,"SELECT id FROM participants p WHERE p.session_id=? AND p.status='completed'"+filt_sql,(session_id,*filt_params)))
+    result = {"session": dict(session), "participantCount": participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "consensusNote": "single_respondent" if len(all_participant_ids) == 1 else None, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
+    result["findings"] = objective_findings(result)
+    # Only computed for the unfiltered ("Tous") call — a sub-population's own profile
+    # breakdown would trivially collapse to ~100% one category, which isn't useful,
+    # and this avoids extra queries on every filtered/compare_population() call.
+    result["participantProfile"] = participant_profile_breakdown(db, session_id) if not participant_filter else None
+    return result
+
+
+def compare_population(db, session_id: str, axis_col: str):
+    """One analysis() call per distinct value of `axis_col` actually present
+    among this session's validated participants — categories with 0 respondents
+    are simply absent (never shown at N=0), per the consignes. Each call reuses
+    analysis()'s own math untouched, so this can never drift from the single-
+    population numbers."""
+    values = [r["v"] for r in rows(db, f"SELECT DISTINCT {axis_col} AS v FROM participants WHERE session_id=? AND status='completed' AND {axis_col} IS NOT NULL AND {axis_col}!=''", (session_id,))]
+    categories = []
+    for value in values:
+        a = analysis(db, session_id, {axis_col: value})
+        categories.append({"value": value, "N": a["completedCount"], "capacity": a["global"]["capacity"], "consensus": a["global"]["consensus"], "consensusNote": a["global"]["consensusNote"], "gradedCapacity": a["global"]["gradedCapacity"], "gradedConsensus": a["global"]["gradedConsensus"], "domains": [{"id": d["id"], "label": d["label"], "capacity": d["capacity"], "consensus": d["consensus"]} for d in a["domains"]]})
+    return categories
 
 
 def qualitative_data(db, session_id: str):
@@ -1678,7 +1857,13 @@ class Handler(SimpleHTTPRequestHandler):
                 if user["role"] == "admin": return self.json(200, rows(db, "SELECT * FROM sessions ORDER BY created_at DESC"))
                 return self.json(200, rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
-                result = analysis(db, path.split("/")[3]); return self.json(200, result or {"error": "Session introuvable"})
+                pf={col: query[qp][0] for qp,col in PARTICIPANT_FILTER_FIELDS.items() if query.get(qp) and query[qp][0]}
+                result = analysis(db, path.split("/")[3], pf or None); return self.json(200, result or {"error": "Session introuvable"})
+            if path.startswith("/api/sessions/") and path.endswith("/compare"):
+                sid=path.split("/")[3]; axis=query.get("axis",[""])[0]
+                if axis not in PARTICIPANT_FILTER_FIELDS: return self.json(400,{"error":"Axe de comparaison invalide."})
+                categories=compare_population(db,sid,PARTICIPANT_FILTER_FIELDS[axis])
+                return self.json(200,{"axis":axis,"categories":categories,"findings":objective_findings(analysis(db,sid),comparison=categories)})
             if path.startswith("/api/sessions/") and path.endswith("/workshop-data"):
                 sid=path.split("/")[3]; return self.json(200,{"priorities":rows(db,"SELECT * FROM priorities WHERE session_id=?",(sid,)),"notes":rows(db,"SELECT * FROM analysis_notes WHERE session_id=?",(sid,)),"recommendations":rows(db,"SELECT * FROM recommendations WHERE session_id=?",(sid,))})
             if path.startswith("/api/sessions/") and path.endswith("/qualitative-data"):
@@ -1693,6 +1878,8 @@ class Handler(SimpleHTTPRequestHandler):
                 sid=path.split("/")[3];data=report_docx(db,sid);mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document';name=export_filename(session_label(db,sid),"rapport",ext="docx")
             elif path.startswith("/api/sessions/") and path.endswith("/individual-responses.xlsx"):
                 sid=path.split("/")[3];data=individual_responses_xlsx(db,sid);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"reponses-individuelles",ext="xlsx")
+            elif path.startswith("/api/sessions/") and path.endswith("/filtered-analysis.xlsx"):
+                sid=path.split("/")[3];pf={col: query[qp][0] for qp,col in PARTICIPANT_FILTER_FIELDS.items() if query.get(qp) and query[qp][0]};data=filtered_analysis_xlsx(db,sid,pf or None);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"analyse-filtree",ext="xlsx")
             else: data=None
             if data is not None:
                 self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Disposition',f'attachment; filename={name}');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(data);return
@@ -1702,6 +1889,8 @@ class Handler(SimpleHTTPRequestHandler):
                 data = buf.getvalue().encode(); name=export_filename(session_label(db,sid),"reponses",ext="csv"); self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/sessions/") and path.endswith("/individual-responses.csv"):
                 sid = path.split("/")[3]; data = individual_responses_csv(db, sid); name=export_filename(session_label(db,sid),"reponses-individuelles",ext="csv"); self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.end_headers(); self.wfile.write(data); return
+            if path.startswith("/api/sessions/") and path.endswith("/filtered-analysis.csv"):
+                sid = path.split("/")[3]; pf={col: query[qp][0] for qp,col in PARTICIPANT_FILTER_FIELDS.items() if query.get(qp) and query[qp][0]}; data = filtered_analysis_csv(db, sid, pf or None); name=export_filename(session_label(db,sid),"analyse-filtree",ext="csv"); self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f"attachment; filename={name}"); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/sessions/") and path.endswith("/ai/report-blocks"):
                 sid = path.split("/")[3]
                 return self.json(200, rows(db, "SELECT section_key,content,retained_at FROM report_ai_blocks WHERE session_id=?", (sid,)))
