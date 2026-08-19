@@ -58,6 +58,7 @@ from epc.auth import (
     AuthRequiredError, PermissionDeniedError, PUBLIC_API_EXACT, is_public_api,
     PBKDF2_ITERATIONS, AUTH_TOKEN_TTL_DAYS, hash_password, verify_password,
     create_auth_token, relay_token_hash, session_cookie_header,
+    resolve_current_user, enforce_ownership, resolve_auth,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -1248,39 +1249,16 @@ class Handler(SimpleHTTPRequestHandler):
     def raw_body(self): return self.rfile.read(int(self.headers.get("Content-Length", 0)))
 
     def current_user(self, db):
-        raw = self.headers.get("Cookie")
-        if not raw: return None
-        jar = SimpleCookie(); jar.load(raw)
-        morsel = jar.get("epc_session")
-        if not morsel: return None
-        token_hash = hashlib.sha256(morsel.value.encode("utf-8")).hexdigest()
-        row = db.execute("SELECT u.* FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.expires_at>?", (token_hash, now())).fetchone()
-        return dict(row) if row else None
+        return resolve_current_user(db, self.headers.get("Cookie"))
 
     def check_ownership(self, path, db, user):
-        parts = path.split("/")
-        if path.startswith("/api/sessions/") and len(parts) > 3 and parts[3]:
-            row = db.execute("SELECT owner_user_id FROM sessions WHERE id=?", (parts[3],)).fetchone()
-            if row and user["role"] != "admin" and row["owner_user_id"] not in (None, user["id"]):
-                raise PermissionDeniedError()
-        elif path.startswith("/api/templates/") and len(parts) > 3 and parts[3] not in ("matrix.xlsx", "import"):
-            row = db.execute("SELECT owner_user_id FROM templates WHERE id=?", (parts[3],)).fetchone()
-            if row and row["owner_user_id"] is not None and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
-                raise PermissionDeniedError()
-        elif path.startswith("/api/campaigns/") and len(parts) > 3 and parts[3]:
-            row = db.execute("SELECT owner_user_id FROM campaigns WHERE id=?", (parts[3],)).fetchone()
-            if row and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
-                raise PermissionDeniedError()
+        enforce_ownership(path, db, user)
 
     def require_auth(self, path, db):
         """Call first inside each verb handler's try block. Returns the current
         user (or None for the small public whitelist) and enforces per-row
         ownership for /api/sessions|templates|campaigns/<id>... routes."""
-        user = self.current_user(db)
-        if path.startswith("/api/") and not is_public_api(path, self.command):
-            if user is None: raise AuthRequiredError()
-            self.check_ownership(path, db, user)
-        return user
+        return resolve_auth(path, self.command, db, self.headers.get("Cookie"))
 
     def do_GET(self):
         path, query = urlparse(self.path).path, parse_qs(urlparse(self.path).query)

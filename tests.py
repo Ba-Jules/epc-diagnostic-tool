@@ -275,4 +275,32 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(deleted); self.assertEqual(used,70)
         self.assertIsNone(self.db.execute('select id from sessions where id=?',('grp-del',)).fetchone())
 
+    # --- Lot 1b (modularisation) : resolution d'utilisateur et d'ownership extraites vers epc/auth.py ---
+
+    def test_resolve_current_user_from_cookie_header(self):
+        uid=self._mk_user('u-auth',role='pilote')
+        self.db.commit()
+        token=app.create_auth_token(self.db,uid)
+        user=app.resolve_current_user(self.db,f'epc_session={token}')
+        self.assertIsNotNone(user); self.assertEqual(user['id'],uid)
+        self.assertIsNone(app.resolve_current_user(self.db,None))
+        self.assertIsNone(app.resolve_current_user(self.db,'epc_session=not-a-real-token'))
+
+    def test_resolve_auth_public_route_without_cookie_returns_none(self):
+        self.assertIsNone(app.resolve_auth('/api/auth/setup-status','GET',self.db,None))
+
+    def test_resolve_auth_private_route_requires_cookie(self):
+        with self.assertRaises(app.AuthRequiredError):
+            app.resolve_auth('/api/sessions','GET',self.db,None)
+
+    def test_resolve_auth_private_route_enforces_ownership(self):
+        uidA=self._mk_user('own-c'); uidB=self._mk_user('own-d')
+        self._mk_campaign('cmp-owned-c',uidA)
+        self.db.commit()
+        tokenA=app.create_auth_token(self.db,uidA); tokenB=app.create_auth_token(self.db,uidB)
+        user=app.resolve_auth('/api/campaigns/cmp-owned-c','GET',self.db,f'epc_session={tokenA}')
+        self.assertEqual(user['id'],uidA)
+        with self.assertRaises(app.PermissionDeniedError):
+            app.resolve_auth('/api/campaigns/cmp-owned-c','GET',self.db,f'epc_session={tokenB}')
+
 if __name__=='__main__': unittest.main()

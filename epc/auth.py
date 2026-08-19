@@ -1,10 +1,11 @@
-"""Primitives d'authentification : hachage de mot de passe, tokens de session,
-cookie et whitelist des routes API publiques.
+"""Authentification : hachage de mot de passe, tokens de session, cookie,
+whitelist des routes API publiques, resolution de l'utilisateur courant et
+controle d'ownership par ligne.
 
-Extrait de app.py (lot 1a de la modularisation, cf. AUDIT_MODULARISATION_8800.md).
-La resolution de l'utilisateur courant et le controle d'ownership par ligne
-restent dans Handler (app.py) : ils sont couples a la requete HTTP (self) et
-seront traites dans un lot dedie, avec ses propres tests.
+Extrait de app.py (lots 1a et 1b de la modularisation, cf.
+AUDIT_MODULARISATION_8800.md). Les fonctions ci-dessous sont pures (aucune
+dependance a la requete HTTP) : Handler (app.py) reste le seul a connaitre
+self.headers/self.command et delegue ici via de fins wrappers.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import hmac
 import secrets
 import sqlite3
 from datetime import datetime, timezone, timedelta
+from http.cookies import SimpleCookie
 
 from .db import now
 
@@ -72,3 +74,43 @@ def session_cookie_header(token: str | None = None, clear: bool = False) -> str:
     if clear:
         return "epc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
     return f"epc_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={AUTH_TOKEN_TTL_DAYS*86400}"
+
+
+def resolve_current_user(db: sqlite3.Connection, cookie_header: str | None):
+    if not cookie_header:
+        return None
+    jar = SimpleCookie(); jar.load(cookie_header)
+    morsel = jar.get("epc_session")
+    if not morsel:
+        return None
+    token_hash = hashlib.sha256(morsel.value.encode("utf-8")).hexdigest()
+    row = db.execute("SELECT u.* FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.expires_at>?", (token_hash, now())).fetchone()
+    return dict(row) if row else None
+
+
+def enforce_ownership(path: str, db: sqlite3.Connection, user) -> None:
+    parts = path.split("/")
+    if path.startswith("/api/sessions/") and len(parts) > 3 and parts[3]:
+        row = db.execute("SELECT owner_user_id FROM sessions WHERE id=?", (parts[3],)).fetchone()
+        if row and user["role"] != "admin" and row["owner_user_id"] not in (None, user["id"]):
+            raise PermissionDeniedError()
+    elif path.startswith("/api/templates/") and len(parts) > 3 and parts[3] not in ("matrix.xlsx", "import"):
+        row = db.execute("SELECT owner_user_id FROM templates WHERE id=?", (parts[3],)).fetchone()
+        if row and row["owner_user_id"] is not None and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
+            raise PermissionDeniedError()
+    elif path.startswith("/api/campaigns/") and len(parts) > 3 and parts[3]:
+        row = db.execute("SELECT owner_user_id FROM campaigns WHERE id=?", (parts[3],)).fetchone()
+        if row and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
+            raise PermissionDeniedError()
+
+
+def resolve_auth(path: str, method: str, db: sqlite3.Connection, cookie_header: str | None):
+    """Call first inside each verb handler's try block. Returns the current
+    user (or None for the small public whitelist) and enforces per-row
+    ownership for /api/sessions|templates|campaigns/<id>... routes."""
+    user = resolve_current_user(db, cookie_header)
+    if path.startswith("/api/") and not is_public_api(path, method):
+        if user is None:
+            raise AuthRequiredError()
+        enforce_ownership(path, db, user)
+    return user
