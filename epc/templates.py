@@ -39,7 +39,7 @@ def clone_template(db, template_id, name=None):
     if not old: raise ValueError("Configuration introuvable")
     tid, stamp = str(uuid.uuid4()), now()
     version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?", (name or old["name"],)).fetchone()[0]
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
+    db.execute("INSERT INTO templates (id,name,version,description,status,scale_json,scoring_json,consensus_json,grading_json,priority_json,created_at,updated_at,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
     for d in old["domains"]:
         did=str(uuid.uuid4()); db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,d["code"],d["label"],d["description"],d["display_order"],d["active"]))
         for i in d["indicators"]:
@@ -52,7 +52,7 @@ def create_blank_template(db, data, owner_user_id=None):
     if not name: raise ValueError("Le nom est obligatoire")
     version=db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?",(name,)).fetchone()[0]
     scale={"type":"numeric","min":1,"max":5,"labels":{}}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id)); db.commit(); return tid
+    db.execute("INSERT INTO templates (id,name,version,description,status,scale_json,scoring_json,consensus_json,grading_json,priority_json,created_at,updated_at,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id)); db.commit(); return tid
 
 
 def matrix_xlsx(template):

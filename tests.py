@@ -652,4 +652,47 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(app.update_session(self.db,'sess-upd',{'name':'Atelier renomme'}))
         self.assertEqual(self.db.execute('select name from sessions where id=?',('sess-upd',)).fetchone()['name'],'Atelier renomme')
 
+    # --- Lot 2a (modularisation, AUDIT_MODULARISATION_8800.md) : identite canonique stable ---
+    # Colonnes additives (model_key/is_canonical) sur templates, encore inertes : rien ne
+    # les lit ailleurs dans le moteur a ce stade, seule leur coherence est testee ici.
+
+    def test_epc_seneval_is_tagged_canonical_after_init(self):
+        row=self.db.execute("select model_key,is_canonical,version from templates where name='EPC / SENEVAL'").fetchone()
+        self.assertEqual(row['model_key'],app.MODEL_KEY_EPC_SENEVAL)
+        self.assertEqual(row['is_canonical'],1)
+
+    def test_exactly_one_canonical_row_per_model_key(self):
+        rows_=self.db.execute("select id from templates where model_key=? and is_canonical=1",(app.MODEL_KEY_EPC_SENEVAL,)).fetchall()
+        self.assertEqual(len(rows_),1)
+
+    def test_custom_templates_are_not_tagged_canonical(self):
+        tid=app.create_blank_template(self.db,{'name':'Modele perso'})
+        self.db.commit()
+        app.ensure_model_identity(self.db)
+        row=self.db.execute('select model_key,is_canonical from templates where id=?',(tid,)).fetchone()
+        self.assertIsNone(row['model_key']); self.assertEqual(row['is_canonical'],0)
+
+    def test_ensure_model_identity_is_idempotent(self):
+        app.ensure_model_identity(self.db)
+        before=[dict(r) for r in self.db.execute('select id,model_key,is_canonical from templates order by id')]
+        app.ensure_model_identity(self.db)
+        after=[dict(r) for r in self.db.execute('select id,model_key,is_canonical from templates order by id')]
+        self.assertEqual(before,after)
+
+    def test_new_reference_version_becomes_the_only_canonical_one(self):
+        # Mirrors test_reference_questionnaire_fix_never_touches_existing_version's setup:
+        # force a stale referential so ensure_reference_questionnaire_version() inserts a
+        # new version, then check ensure_model_identity() moves is_canonical onto it and
+        # off the old one - without touching the old version's rows/history.
+        old_tid=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        domain=self.db.execute('select id from domains where template_id=? order by display_order limit 1',(old_tid,)).fetchone()['id']
+        self.db.execute('update domains set code=? where id=?',('stale-code',domain)); self.db.commit()
+        app.ensure_reference_questionnaire_version(self.db)
+        app.ensure_model_identity(self.db)
+        new_tid=self.db.execute("select id from templates where name='EPC / SENEVAL' order by version desc limit 1").fetchone()['id']
+        self.assertNotEqual(new_tid,old_tid)
+        self.assertEqual(self.db.execute('select is_canonical from templates where id=?',(old_tid,)).fetchone()['is_canonical'],0)
+        self.assertEqual(self.db.execute('select is_canonical from templates where id=?',(new_tid,)).fetchone()['is_canonical'],1)
+        self.assertEqual(self.db.execute('select code from domains where id=?',(domain,)).fetchone()['code'],'stale-code')
+
 if __name__=='__main__': unittest.main()

@@ -161,11 +161,16 @@ def init_db(db: sqlite3.Connection) -> None:
     template_columns = {r["name"] for r in db.execute("PRAGMA table_info(templates)")}
     if "owner_user_id" not in template_columns:
         db.execute("ALTER TABLE templates ADD COLUMN owner_user_id TEXT")
+    if "model_key" not in template_columns:
+        db.execute("ALTER TABLE templates ADD COLUMN model_key TEXT")
+    if "is_canonical" not in template_columns:
+        db.execute("ALTER TABLE templates ADD COLUMN is_canonical INTEGER NOT NULL DEFAULT 0")
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
     ensure_reference_questionnaire_version(db)
     migrate_v2_ownership(db)
+    ensure_model_identity(db)
 
 
 def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:
@@ -199,7 +204,7 @@ def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:
     old = template_payload(db, tid)
     version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name='EPC / SENEVAL'").fetchone()[0]
     new_tid, stamp = str(uuid.uuid4()), now()
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_tid, "EPC / SENEVAL", version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
+    db.execute("INSERT INTO templates (id,name,version,description,status,scale_json,scoring_json,consensus_json,grading_json,priority_json,created_at,updated_at,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_tid, "EPC / SENEVAL", version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
         did = str(uuid.uuid4())
         db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, new_tid, code, label, "", d_order, 1))
@@ -235,12 +240,35 @@ def migrate_v2_ownership(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+# Model registry, keyed by a stable identifier that survives a rename — the first step
+# (lot 2a) of AUDIT_MODULARISATION_8800.md's Lot 2. Purely additive and currently inert:
+# model_key/is_canonical are populated here but nothing else reads them yet. Every
+# EPC_DOMAINS-derived version (any row named "EPC / SENEVAL", any `version`) is tagged
+# model_key='epc_seneval'; only the single latest version is_canonical=1, matching
+# exactly what ensure_reference_questionnaire_version()/migrate_v2_ownership() already
+# treat as "the" reference row by name. Custom/imported templates are left untouched
+# (model_key NULL, is_canonical 0) — the correct default for a model that isn't builtin.
+MODEL_KEY_EPC_SENEVAL = "epc_seneval"
+
+
+def ensure_model_identity(db: sqlite3.Connection) -> None:
+    """Runs on every startup (idempotent: a no-op once model_key/is_canonical already
+    match the current rows). Must run after ensure_reference_questionnaire_version()
+    so "the latest version" reflects any version it just inserted."""
+    db.execute("UPDATE templates SET model_key=? WHERE name='EPC / SENEVAL' AND (model_key IS NULL OR model_key!=?)", (MODEL_KEY_EPC_SENEVAL, MODEL_KEY_EPC_SENEVAL))
+    latest = db.execute("SELECT id FROM templates WHERE model_key=? ORDER BY version DESC LIMIT 1", (MODEL_KEY_EPC_SENEVAL,)).fetchone()
+    if latest:
+        db.execute("UPDATE templates SET is_canonical=1 WHERE id=? AND is_canonical!=1", (latest["id"],))
+        db.execute("UPDATE templates SET is_canonical=0 WHERE model_key=? AND id!=? AND is_canonical!=0", (MODEL_KEY_EPC_SENEVAL, latest["id"]))
+    db.commit()
+
+
 def seed_epc(db: sqlite3.Connection) -> str:
     tid, stamp = str(uuid.uuid4()), now()
     scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None))
+    db.execute("INSERT INTO templates (id,name,version,description,status,scale_json,scoring_json,consensus_json,grading_json,priority_json,created_at,updated_at,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None))
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
         did = str(uuid.uuid4())
         db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))

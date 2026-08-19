@@ -50,6 +50,7 @@ except ImportError:
 from epc.db import (
     DATABASE, EPC_DOMAINS, GRADING, now, rows, connect, init_db,
     ensure_reference_questionnaire_version, migrate_v2_ownership, seed_epc, template_payload,
+    MODEL_KEY_EPC_SENEVAL, ensure_model_identity,
 )
 from epc.auth import (
     AuthRequiredError, PermissionDeniedError, PUBLIC_API_EXACT, is_public_api,
