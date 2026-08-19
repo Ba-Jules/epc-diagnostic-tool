@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import uuid
 import unittest
@@ -398,5 +399,99 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.execute('select display_name from participants where id=?',(pid,)).fetchone()['display_name'],'Nouveau nom')
         app.update_participant_display_name(self.db,pid,'')
         self.assertIsNone(self.db.execute('select display_name from participants where id=?',(pid,)).fetchone()['display_name'])
+
+    # --- Lot 1f (modularisation) : chaine qualitative extraite vers epc/qualitatif.py ---
+
+    def _mk_priority(self,sid,template_id):
+        domain=self.db.execute('select id from domains where template_id=? order by display_order limit 1',(template_id,)).fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.toggle_priority(self.db,sid,{'domainId':domain,'indicatorId':indicator,'votes':1})
+        return self.db.execute('select id from priorities where session_id=? and indicator_id=?',(sid,indicator)).fetchone()['id'], domain, indicator
+
+    def test_toggle_priority_upserts_votes_then_delete_removes_it(self):
+        t=self._mk_session('sess-prio')
+        pid,domain,indicator=self._mk_priority('sess-prio',t)
+        self.assertEqual(self.db.execute('select votes from priorities where id=?',(pid,)).fetchone()['votes'],1)
+        app.toggle_priority(self.db,'sess-prio',{'domainId':domain,'indicatorId':indicator,'votes':3})
+        self.assertEqual(self.db.execute('select count(*) from priorities where session_id=?',('sess-prio',)).fetchone()[0],1)
+        self.assertEqual(self.db.execute('select votes from priorities where id=?',(pid,)).fetchone()['votes'],3)
+        app.delete_priority(self.db,'sess-prio',indicator)
+        self.assertIsNone(self.db.execute('select id from priorities where id=?',(pid,)).fetchone())
+
+    def test_priority_analysis_upsert_and_update(self):
+        t=self._mk_session('sess-pa')
+        pid,_,_=self._mk_priority('sess-pa',t)
+        app.upsert_priority_analysis(self.db,'sess-pa',{'priorityId':pid,'problem':'Constat initial'})
+        aid=self.db.execute('select id from priority_analyses where session_id=? and priority_id=?',('sess-pa',pid)).fetchone()['id']
+        self.assertEqual(self.db.execute('select problem from priority_analyses where id=?',(aid,)).fetchone()['problem'],'Constat initial')
+        app.upsert_priority_analysis(self.db,'sess-pa',{'priorityId':pid,'problem':'Constat revise'})
+        self.assertEqual(self.db.execute('select count(*) from priority_analyses where session_id=?',('sess-pa',)).fetchone()[0],1)
+        self.assertEqual(self.db.execute('select problem from priority_analyses where id=?',(aid,)).fetchone()['problem'],'Constat revise')
+        app.update_priority_analysis(self.db,aid,'Constat final')
+        self.assertEqual(self.db.execute('select problem from priority_analyses where id=?',(aid,)).fetchone()['problem'],'Constat final')
+
+    def test_analysis_entry_create_update_and_dependency_blocked_delete(self):
+        t=self._mk_session('sess-ae')
+        pid,_,_=self._mk_priority('sess-ae',t)
+        cause_id=app.create_analysis_entry(self.db,'sess-ae',{'priorityId':pid,'kind':'cause','content':'Cause A'})
+        app.update_analysis_entry(self.db,cause_id,{'content':'Cause A revisee','validationStatus':'RETENU'})
+        self.assertEqual(self.db.execute('select content,validation_status from analysis_entries where id=?',(cause_id,)).fetchone()[:],('Cause A revisee','RETENU'))
+        rec_id=app.create_workshop_recommendation(self.db,'sess-ae',{'priorityId':pid,'causeId':cause_id,'title':'Action X','description':'Desc'})
+        deleted,dependent=app.delete_analysis_entry(self.db,cause_id,force=False)
+        self.assertFalse(deleted); self.assertEqual(dependent,1)
+        self.assertIsNotNone(self.db.execute('select id from analysis_entries where id=?',(cause_id,)).fetchone())
+        deleted,dependent=app.delete_analysis_entry(self.db,cause_id,force=True)
+        self.assertTrue(deleted)
+        self.assertIsNone(self.db.execute('select id from analysis_entries where id=?',(cause_id,)).fetchone())
+        self.assertIsNone(self.db.execute('select cause_id from workshop_recommendations where id=?',(rec_id,)).fetchone()['cause_id'])
+
+    def test_workshop_recommendation_update_and_dependency_blocked_delete(self):
+        t=self._mk_session('sess-rec')
+        pid,_,_=self._mk_priority('sess-rec',t)
+        rec_id=app.create_workshop_recommendation(self.db,'sess-rec',{'priorityId':pid,'title':'Action Y','description':'Desc'})
+        app.update_workshop_recommendation(self.db,rec_id,{'priorityId':pid,'title':'Action Y modifiee','description':'Desc 2','status':'Retenue'})
+        self.assertEqual(self.db.execute('select title,status from workshop_recommendations where id=?',(rec_id,)).fetchone()[:],('Action Y modifiee','Retenue'))
+        topic_id=app.create_training_topic(self.db,'sess-rec',{'recommendationId':rec_id,'title':'Formation Z'})
+        deleted,dependent=app.delete_workshop_recommendation(self.db,rec_id,force=False)
+        self.assertFalse(deleted); self.assertEqual(dependent,1)
+        deleted,dependent=app.delete_workshop_recommendation(self.db,rec_id,force=True)
+        self.assertTrue(deleted)
+        self.assertIsNone(self.db.execute('select id from workshop_recommendations where id=?',(rec_id,)).fetchone())
+        self.assertIsNone(self.db.execute('select recommendation_id from training_topics where id=?',(topic_id,)).fetchone()['recommendation_id'])
+
+    def test_training_topic_update_and_delete(self):
+        t=self._mk_session('sess-tt')
+        pid,_,_=self._mk_priority('sess-tt',t)
+        topic_id=app.create_training_topic(self.db,'sess-tt',{'priorityId':pid,'title':'Formation initiale'})
+        app.update_training_topic(self.db,topic_id,{'priorityId':pid,'title':'Formation renommee'})
+        self.assertEqual(self.db.execute('select title from training_topics where id=?',(topic_id,)).fetchone()['title'],'Formation renommee')
+        app.delete_training_topic(self.db,topic_id)
+        self.assertIsNone(self.db.execute('select id from training_topics where id=?',(topic_id,)).fetchone())
+
+    def test_report_meta_upsert(self):
+        self._mk_session('sess-meta')
+        app.upsert_report_meta(self.db,'sess-meta',{'facilitator':'Awa','audience':'Equipe','context':'Ctx','conclusion':'Concl'})
+        row=self.db.execute('select * from session_report_meta where session_id=?',('sess-meta',)).fetchone()
+        self.assertEqual(row['facilitator'],'Awa')
+        app.upsert_report_meta(self.db,'sess-meta',{'facilitator':'Awa D.','audience':'Equipe','context':'Ctx','conclusion':'Concl'})
+        self.assertEqual(self.db.execute('select count(*) from session_report_meta where session_id=?',('sess-meta',)).fetchone()[0],1)
+        self.assertEqual(self.db.execute('select facilitator from session_report_meta where session_id=?',('sess-meta',)).fetchone()['facilitator'],'Awa D.')
+
+    def test_legacy_v1_recommendation_still_works(self):
+        t=self._mk_session('sess-legacy')
+        indicator=self.db.execute('select id from indicators limit 1').fetchone()['id']
+        app.create_legacy_recommendation(self.db,'sess-legacy',{'indicatorId':indicator,'title':'Reco V1'})
+        self.assertEqual(self.db.execute('select count(*) from recommendations where session_id=?',('sess-legacy',)).fetchone()[0],1)
+
+    def test_legacy_v1_analysis_note_has_a_preexisting_column_count_bug(self):
+        # Pre-existing bug, unrelated to this refactor (present verbatim on master @
+        # 909236c, before any modularisation commit): the INSERT statement has 9 "?"
+        # placeholders for the 8-column analysis_notes table, so this legacy V1 route
+        # has never worked. Documented here rather than "fixed" - Lot 1 only relocates
+        # code, it must not change behaviour (see AUDIT_MODULARISATION_8800.md).
+        t=self._mk_session('sess-legacy-bug')
+        indicator=self.db.execute('select id from indicators limit 1').fetchone()['id']
+        with self.assertRaises(sqlite3.OperationalError):
+            app.create_analysis_note(self.db,'sess-legacy-bug',{'indicatorId':indicator,'kind':'cause','content':'Note V1'})
 
 if __name__=='__main__': unittest.main()

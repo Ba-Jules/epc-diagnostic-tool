@@ -72,6 +72,13 @@ from epc.collecte import (
     CollecteClosedError, create_participant, submit_response, complete_participant,
     update_participant_display_name, participant_resume,
 )
+from epc.qualitatif import (
+    toggle_priority, delete_priority, upsert_priority_analysis, update_priority_analysis,
+    create_analysis_entry, update_analysis_entry, delete_analysis_entry,
+    create_workshop_recommendation, update_workshop_recommendation, delete_workshop_recommendation,
+    create_training_topic, update_training_topic, delete_training_topic,
+    upsert_report_meta, create_analysis_note, create_legacy_recommendation,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -1378,25 +1385,21 @@ class Handler(SimpleHTTPRequestHandler):
             if path.endswith("/status"):
                 sid = path.split("/")[3]; status = data["status"]; db.execute("UPDATE sessions SET status=?,closed_at=? WHERE id=?", (status, now() if status == "closed" else None, sid)); db.commit(); return self.json(200, {"ok": True})
             if path.endswith("/priorities"):
-                sid = path.split("/")[3]; db.execute("INSERT INTO priorities VALUES (?,?,?,?,?,?) ON CONFLICT(session_id,indicator_id) DO UPDATE SET votes=excluded.votes", (str(uuid.uuid4()), sid, data["domainId"], data["indicatorId"], int(data.get("votes", 0)), now())); db.commit(); return self.json(200, {"ok": True})
+                sid = path.split("/")[3]; toggle_priority(db, sid, data); return self.json(200, {"ok": True})
             if path.endswith("/priority-analyses"):
-                sid=path.split("/")[3]; stamp=now(); priority_id=data["priorityId"]
-                db.execute("INSERT INTO priority_analyses VALUES (?,?,?,?,?,?) ON CONFLICT(session_id,priority_id) DO UPDATE SET problem=excluded.problem,updated_at=excluded.updated_at",(str(uuid.uuid4()),sid,priority_id,data.get("problem",""),stamp,stamp)); db.commit(); return self.json(201,{"ok":True})
+                sid=path.split("/")[3]; upsert_priority_analysis(db, sid, data); return self.json(201,{"ok":True})
             if path.endswith("/analysis-entries"):
-                sid=path.split("/")[3]; stamp=now(); eid=str(uuid.uuid4())
-                db.execute("INSERT INTO analysis_entries VALUES (?,?,?,?,?,?,?,?,?,?,?)",(eid,sid,data["priorityId"],data.get("parentId") or None,data["kind"],data["content"],data.get("itemType") or None,data.get("comment") or None,data.get("validationStatus","A_DISCUTER"),stamp,stamp)); db.commit(); return self.json(201,{"id":eid})
+                sid=path.split("/")[3]; return self.json(201,{"id":create_analysis_entry(db, sid, data)})
             if path.endswith("/recommendations-v2"):
-                sid=path.split("/")[3]; stamp=now(); rid=str(uuid.uuid4())
-                db.execute("INSERT INTO workshop_recommendations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(rid,sid,data.get("priorityId") or None,data.get("causeId") or None,data.get("leverId") or None,data["title"],data["description"],data.get("category","Autre"),data.get("priorityLevel","Non définie"),data.get("owner") or None,data.get("horizon") or None,data.get("comment") or None,data.get("status","Proposée"),stamp,stamp)); db.commit(); return self.json(201,{"id":rid})
+                sid=path.split("/")[3]; return self.json(201,{"id":create_workshop_recommendation(db, sid, data)})
             if path.endswith("/training-topics"):
-                sid=path.split("/")[3]; stamp=now(); tid=str(uuid.uuid4())
-                db.execute("INSERT INTO training_topics VALUES (?,?,?,?,?,?,?,?,?,?,?)",(tid,sid,data.get("priorityId") or None,data.get("recommendationId") or None,data["title"],data.get("needText") or None,data.get("targetAudience") or None,data.get("priorityLevel","Non définie"),data.get("comment") or None,stamp,stamp)); db.commit(); return self.json(201,{"id":tid})
+                sid=path.split("/")[3]; return self.json(201,{"id":create_training_topic(db, sid, data)})
             if path.endswith("/report-meta"):
-                sid=path.split("/")[3]; db.execute("INSERT INTO session_report_meta VALUES (?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET facilitator=excluded.facilitator,audience=excluded.audience,context=excluded.context,conclusion=excluded.conclusion,updated_at=excluded.updated_at",(sid,data.get("facilitator",""),data.get("audience",""),data.get("context",""),data.get("conclusion",""),now())); db.commit(); return self.json(200,{"ok":True})
+                sid=path.split("/")[3]; upsert_report_meta(db, sid, data); return self.json(200,{"ok":True})
             if path.endswith("/analysis-notes"):
-                sid = path.split("/")[3]; stamp=now(); db.execute("INSERT INTO analysis_notes VALUES (?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), sid, data.get("indicatorId"), data["kind"], data["content"], data.get("validationStatus", "HYPOTHESE"), stamp, stamp)); db.commit(); return self.json(201, {"ok": True})
+                sid = path.split("/")[3]; create_analysis_note(db, sid, data); return self.json(201, {"ok": True})
             if path.endswith("/recommendations"):
-                sid=path.split("/")[3]; db.execute("INSERT INTO recommendations VALUES (?,?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),sid,data.get("indicatorId"),data["title"],data.get("description",""),data.get("lever",""),data.get("kind","action"),data.get("owner",""),data.get("horizon",""),now())); db.commit(); return self.json(201,{"ok":True})
+                sid=path.split("/")[3]; create_legacy_recommendation(db, sid, data); return self.json(201,{"ok":True})
             return self.json(404, {"error": "Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
@@ -1441,17 +1444,17 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/participants/"):
                 pid=path.split("/")[3]; update_participant_display_name(db, pid, data.get("displayName")); return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
-                db.execute("UPDATE priority_analyses SET problem=?,updated_at=? WHERE id=?",(data.get("problem",""),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
+                update_priority_analysis(db, path.split("/")[3], data.get("problem")); return self.json(200,{"ok":True})
             if path.startswith("/api/ai-suggestions/"):
                 status = data.get("status")
                 if status not in ("proposed", "modified", "retained", "rejected"): return self.json(400, {"error": "Statut invalide."})
                 db.execute("UPDATE ai_suggestions SET status=?,updated_at=? WHERE id=?", (status, now(), path.split("/")[3])); db.commit(); return self.json(200, {"ok": True})
             if path.startswith("/api/analysis-entries/"):
-                db.execute("UPDATE analysis_entries SET parent_id=?,content=?,item_type=?,comment=?,validation_status=?,updated_at=? WHERE id=?",(data.get("parentId") or None,data["content"],data.get("itemType") or None,data.get("comment") or None,data.get("validationStatus","A_DISCUTER"),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
+                update_analysis_entry(db, path.split("/")[3], data); return self.json(200,{"ok":True})
             if path.startswith("/api/recommendations-v2/"):
-                db.execute("UPDATE workshop_recommendations SET priority_id=?,cause_id=?,lever_id=?,title=?,description=?,category=?,priority_level=?,owner=?,horizon=?,comment=?,status=?,updated_at=? WHERE id=?",(data.get("priorityId") or None,data.get("causeId") or None,data.get("leverId") or None,data["title"],data["description"],data.get("category","Autre"),data.get("priorityLevel","Non définie"),data.get("owner") or None,data.get("horizon") or None,data.get("comment") or None,data.get("status","Proposée"),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
+                update_workshop_recommendation(db, path.split("/")[3], data); return self.json(200,{"ok":True})
             if path.startswith("/api/training-topics/"):
-                db.execute("UPDATE training_topics SET priority_id=?,recommendation_id=?,title=?,need_text=?,target_audience=?,priority_level=?,comment=?,updated_at=? WHERE id=?",(data.get("priorityId") or None,data.get("recommendationId") or None,data["title"],data.get("needText") or None,data.get("targetAudience") or None,data.get("priorityLevel","Non définie"),data.get("comment") or None,now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
+                update_training_topic(db, path.split("/")[3], data); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
                 tid=path.split("/")[3]; used=db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone()
                 if used:
@@ -1494,15 +1497,17 @@ class Handler(SimpleHTTPRequestHandler):
                 sid=path.split("/")[3]; section=path.rsplit("/",1)[1]
                 db.execute("DELETE FROM report_ai_blocks WHERE session_id=? AND section_key=?",(sid,section)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/analysis-entries/"):
-                eid=path.split("/")[3]; dependent=db.execute("SELECT COUNT(*) FROM workshop_recommendations WHERE cause_id=? OR lever_id=?",(eid,eid)).fetchone()[0]
-                if dependent and parse_qs(urlparse(self.path).query).get("force",["0"])[0] != "1": return self.json(409,{"error":f"Cette entrée est utilisée par {dependent} recommandation(s). Confirmez la suppression.","dependencies":dependent})
-                db.execute("UPDATE workshop_recommendations SET cause_id=NULL WHERE cause_id=?",(eid,)); db.execute("UPDATE workshop_recommendations SET lever_id=NULL WHERE lever_id=?",(eid,)); db.execute("UPDATE analysis_entries SET parent_id=NULL WHERE parent_id=?",(eid,)); db.execute("DELETE FROM analysis_entries WHERE id=?",(eid,)); db.commit(); return self.json(200,{"ok":True})
+                eid=path.split("/")[3]; force = parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1"
+                deleted, dependent = delete_analysis_entry(db, eid, force=force)
+                if not deleted: return self.json(409,{"error":f"Cette entrée est utilisée par {dependent} recommandation(s). Confirmez la suppression.","dependencies":dependent})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/recommendations-v2/"):
-                rid=path.split("/")[3]; dependent=db.execute("SELECT COUNT(*) FROM training_topics WHERE recommendation_id=?",(rid,)).fetchone()[0]
-                if dependent and parse_qs(urlparse(self.path).query).get("force",["0"])[0] != "1": return self.json(409,{"error":f"Cette recommandation est liée à {dependent} thème(s) de formation. Confirmez la suppression.","dependencies":dependent})
-                db.execute("UPDATE training_topics SET recommendation_id=NULL WHERE recommendation_id=?",(rid,)); db.execute("DELETE FROM workshop_recommendations WHERE id=?",(rid,)); db.commit(); return self.json(200,{"ok":True})
+                rid=path.split("/")[3]; force = parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1"
+                deleted, dependent = delete_workshop_recommendation(db, rid, force=force)
+                if not deleted: return self.json(409,{"error":f"Cette recommandation est liée à {dependent} thème(s) de formation. Confirmez la suppression.","dependencies":dependent})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/training-topics/"):
-                db.execute("DELETE FROM training_topics WHERE id=?",(path.split("/")[3],)); db.commit(); return self.json(200,{"ok":True})
+                delete_training_topic(db, path.split("/")[3]); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
                 tid=path.split("/")[3]
                 protected=db.execute("SELECT name FROM templates WHERE id=?",(tid,)).fetchone()
@@ -1525,7 +1530,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.json(409,{"error":f"Suppression impossible : {used} réponse(s) sont déjà enregistrées pour cette question. Désactivez-la plutôt pour préserver l'historique.","dependencies":used})
                 db.execute("DELETE FROM indicators WHERE id=?",(iid,)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and "/priorities/" in path:
-                parts=path.split("/"); db.execute("DELETE FROM priorities WHERE session_id=? AND indicator_id=?",(parts[3],parts[5])); db.commit(); return self.json(200,{"ok":True})
+                parts=path.split("/"); delete_priority(db, parts[3], parts[5]); return self.json(200,{"ok":True})
             if path.startswith("/api/sessions/") and len(path.rstrip("/").split("/")) == 4:
                 sid=path.rstrip("/").split("/")[3]
                 for table in SESSION_CHILD_TABLES:
