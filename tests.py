@@ -118,6 +118,83 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(out['global']['gradedCapacity'],85)
         self.assertEqual(out['global']['gradedConsensus'],50)
 
+    # --- Lot 3 (modularisation, AUDIT_MODULARISATION_8800.md) : golden tests decimaux
+    # figeant le comportement de grade()/analysis()/analysis_for() AVANT extraction vers
+    # epc/scoring.py - bornes de graduation, N=0/N=1/N>1, "manquants", ponderation entre
+    # domaines. Doivent rester vrais a l'identique apres le deplacement du code. ---
+
+    def test_grade_boundaries_exact(self):
+        norm=app.GRADING
+        self.assertEqual(app.grade(0,norm),5)
+        self.assertEqual(app.grade(22,norm),5)
+        self.assertEqual(app.grade(23,norm),10)
+        self.assertEqual(app.grade(59,norm),35)
+        self.assertEqual(app.grade(60,norm),40)
+        self.assertEqual(app.grade(98,norm),95)
+        self.assertEqual(app.grade(99,norm),100)
+        self.assertEqual(app.grade(100,norm),100)
+        self.assertEqual(app.grade(-5,norm),5)
+        self.assertEqual(app.grade(150,norm),100)
+        self.assertEqual(app.grade(22.4,norm),5)
+        self.assertEqual(app.grade(22.6,norm),10)
+        self.assertIsNone(app.grade(None,norm))
+
+    def test_analysis_single_respondent_consensus_not_calculable(self):
+        t=self._mk_session('sess-n1')
+        self._add_participant('sess-n1','solo',t,value=3,n=1)
+        self.db.commit()
+        out=app.analysis(self.db,'sess-n1')
+        ind=out['domains'][0]['indicators'][0]
+        self.assertEqual(ind['responses'],1); self.assertEqual(ind['capacity'],60.0)
+        self.assertIsNone(ind['consensus']); self.assertEqual(ind['consensusNote'],'single_respondent')
+        dom=out['domains'][0]
+        self.assertEqual(dom['responses'],1); self.assertIsNone(dom['consensus'])
+        self.assertEqual(dom['consensusNote'],'single_respondent')
+        self.assertEqual(out['global']['consensusNote'],'single_respondent')
+        self.assertIsNone(out['global']['consensus'])
+
+    def test_analysis_zero_participants_returns_none_scores(self):
+        self._mk_session('sess-n0')
+        self.db.commit()
+        out=app.analysis(self.db,'sess-n0')
+        self.assertEqual(out['participantCount'],0); self.assertEqual(out['completedCount'],0)
+        ind=out['domains'][0]['indicators'][0]
+        self.assertEqual(ind['responses'],0); self.assertEqual(ind['missing'],0)
+        self.assertIsNone(ind['capacity']); self.assertIsNone(ind['consensus'])
+        self.assertIsNone(out['global']['capacity']); self.assertIsNone(out['global']['consensus'])
+        self.assertEqual(out['global']['responses'],0)
+
+    def test_analysis_missing_count_reflects_total_participants(self):
+        t=self._mk_session('sess-missing')
+        self._add_participant('sess-missing','p1',t,value=4,status='completed')
+        self._add_participant('sess-missing','p2',t,value=None,status='in_progress')
+        self.db.commit()
+        out=app.analysis(self.db,'sess-missing')
+        self.assertEqual(out['participantCount'],2)
+        ind=out['domains'][0]['indicators'][0]
+        self.assertEqual(ind['responses'],1); self.assertEqual(ind['missing'],1)
+
+    def test_global_capacity_is_unweighted_mean_across_domains(self):
+        # Proves global capacity averages domain capacities directly (the reference
+        # KOICA tool's "Moyenne" row), never a response-weighted pool - domain 0 has
+        # 1 respondent, domain 1 has 4, and a weighted average would be far from 60.
+        t=self._mk_session('sess-domain-weight')
+        domains=[r['id'] for r in self.db.execute('select id from domains where template_id=? order by display_order',(t,))]
+        dom0_inds=[r['id'] for r in self.db.execute('select id from indicators where domain_id=? order by display_order',(domains[0],))]
+        dom1_inds=[r['id'] for r in self.db.execute('select id from indicators where domain_id=? order by display_order',(domains[1],))]
+        def add(pid,inds,value):
+            self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,'sess-domain-weight',pid,'completed',app.now(),app.now(),None))
+            for iid in inds:
+                self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),'sess-domain-weight',pid,iid,str(value),'numeric',app.now(),app.now()))
+        add('p1',dom0_inds,5)
+        for pid in ('p2','p3','p4','p5'): add(pid,dom1_inds,1)
+        self.db.commit()
+        out=app.analysis(self.db,'sess-domain-weight')
+        dom_by_id={d['id']:d for d in out['domains']}
+        self.assertEqual(dom_by_id[domains[0]]['capacity'],100.0)
+        self.assertEqual(dom_by_id[domains[1]]['capacity'],20.0)
+        self.assertEqual(out['global']['capacity'],60.0)
+
     def test_recette_scenario_2_consolidated(self):
         t=self._mk_session('scenario2')
         for i,v in enumerate([5]*5+[1]*5): self._add_participant('scenario2',f'p{i}',t,value=v)
