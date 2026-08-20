@@ -190,10 +190,18 @@ def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:
     latest version by default (see consignes_claude.txt: existing ateliers must
     not be silently altered when their questionnaire is versioned; an automatic
     migration that risks changing historical responses must NOT be done).
+
+    Finds "the latest version" by model_key OR name (lot 2c, cf.
+    AUDIT_MODULARISATION_8800.md): model_key is only populated after the first
+    ensure_model_identity() call, so name is still needed as a bootstrap fallback,
+    but model_key is what makes this resilient to a rename via PUT
+    /api/templates/{id} — matching by name alone would have missed a renamed
+    latest version and silently reseeded a duplicate default "EPC / SENEVAL" v1
+    (or a duplicate next version number) alongside the renamed, orphaned one.
     """
     target_codes = [code for code, _, _ in EPC_DOMAINS]
     target_counts = {code: len(indicators) for code, _, indicators in EPC_DOMAINS}
-    latest = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version DESC LIMIT 1").fetchone()
+    latest = db.execute("SELECT id FROM templates WHERE model_key=? OR name='EPC / SENEVAL' ORDER BY version DESC LIMIT 1", (MODEL_KEY_EPC_SENEVAL,)).fetchone()
     if not latest:
         seed_epc(db)
         return
@@ -207,7 +215,7 @@ def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:
         return
 
     old = template_payload(db, tid)
-    version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name='EPC / SENEVAL'").fetchone()[0]
+    version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE model_key=? OR name='EPC / SENEVAL'", (MODEL_KEY_EPC_SENEVAL,)).fetchone()[0]
     new_tid, stamp = str(uuid.uuid4()), now()
     db.execute("INSERT INTO templates (id,name,version,description,status,scale_json,scoring_json,consensus_json,grading_json,priority_json,created_at,updated_at,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_tid, "EPC / SENEVAL", version, old["description"], "active", json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id")))
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):

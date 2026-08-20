@@ -717,4 +717,40 @@ class EngineTests(unittest.TestCase):
         app.migrate_v2_ownership(self.db)
         self.assertEqual(self.db.execute('select owner_user_id from templates where id=?',(tid,)).fetchone()['owner_user_id'],uid)
 
+    # --- Lot 2c (modularisation, AUDIT_MODULARISATION_8800.md) : la reference EPC
+    # se retrouve par model_key, plus seulement par nom, dans ensure_reference_
+    # questionnaire_version() elle-meme (pas seulement dans les lecteurs du lot 2b) ---
+
+    def test_renaming_the_only_reference_version_does_not_spawn_a_duplicate(self):
+        # Was broken before this fix: renaming the sole EPC/SENEVAL version made
+        # ensure_reference_questionnaire_version() find no row by name, so it called
+        # seed_epc() again and silently created a brand new default "EPC / SENEVAL" v1,
+        # orphaning the renamed one.
+        tid=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        self.db.execute("update templates set name=? where id=?",('EPC / SENEVAL (renomme)',tid)); self.db.commit()
+        app.ensure_reference_questionnaire_version(self.db)
+        app.ensure_model_identity(self.db)
+        rows_=self.db.execute("select id,name from templates where model_key=?",(app.MODEL_KEY_EPC_SENEVAL,)).fetchall()
+        self.assertEqual(len(rows_),1)
+        self.assertEqual(rows_[0]['id'],tid)
+        self.assertEqual(rows_[0]['name'],'EPC / SENEVAL (renomme)')
+
+    def test_renaming_the_latest_of_several_versions_does_not_spawn_a_duplicate(self):
+        # Same bug, narrower trigger: with two versions, renaming only the latest one
+        # used to make the name-based lookup fall back to the older (stale) version,
+        # which then looked out-of-date and triggered a spurious next-version insert.
+        old_tid=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        domain=self.db.execute('select id from domains where template_id=? order by display_order limit 1',(old_tid,)).fetchone()['id']
+        self.db.execute('update domains set code=? where id=?',('stale-code',domain)); self.db.commit()
+        app.ensure_reference_questionnaire_version(self.db); app.ensure_model_identity(self.db)
+        new_tid=self.db.execute("select id from templates where model_key=? order by version desc limit 1",(app.MODEL_KEY_EPC_SENEVAL,)).fetchone()['id']
+        self.assertNotEqual(new_tid,old_tid)
+        self.db.execute("update templates set name=? where id=?",('EPC / SENEVAL (renomme)',new_tid)); self.db.commit()
+        app.ensure_reference_questionnaire_version(self.db)
+        app.ensure_model_identity(self.db)
+        rows_=self.db.execute("select id,name,version from templates where model_key=? order by version",(app.MODEL_KEY_EPC_SENEVAL,)).fetchall()
+        self.assertEqual(len(rows_),2)
+        self.assertEqual(rows_[-1]['id'],new_tid)
+        self.assertEqual(rows_[-1]['name'],'EPC / SENEVAL (renomme)')
+
 if __name__=='__main__': unittest.main()
