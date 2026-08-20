@@ -22,7 +22,7 @@ try:  # Used only to generate the downloadable Excel template; the app stays loc
 except ImportError:
     xlsxwriter = None
 
-from .db import GRADING, now, rows, template_payload
+from .db import GRADING, MODEL_KEY_EPC_SENEVAL, now, rows, template_payload
 
 MATRIX_COLUMNS = ["Domaine", "Ordre domaine", "Code indicateur", "Indicateur", "Description", "Ordre indicateur", "Type réponse", "Obligatoire", "Actif"]
 PARAMETERS = ["Nom questionnaire", "Description", "Version", "Type d'échelle", "Valeur minimum", "Valeur maximum", "Libellés des valeurs", "Nombre de priorités par domaine"]
@@ -178,9 +178,14 @@ def update_template(db, template_id, data):
 
 def delete_template(db, template_id, force=False):
     """Returns one of "protected" (EPC/SENEVAL, never deletable), "in_use" (blocked
-    unless force=True, in which case it's archived instead of deleted), or "deleted"."""
-    protected = db.execute("SELECT name FROM templates WHERE id=?", (template_id,)).fetchone()
-    if protected and protected["name"] == "EPC / SENEVAL":
+    unless force=True, in which case it's archived instead of deleted), or "deleted".
+
+    Protection is keyed by model_key rather than name (lot 2b, cf.
+    AUDIT_MODULARISATION_8800.md): unlike name, model_key survives a rename via
+    the PUT route above, so a renamed reference questionnaire stays protected.
+    """
+    protected = db.execute("SELECT model_key FROM templates WHERE id=?", (template_id,)).fetchone()
+    if protected and protected["model_key"] == MODEL_KEY_EPC_SENEVAL:
         return "protected"
     if db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1", (template_id,)).fetchone():
         if force:

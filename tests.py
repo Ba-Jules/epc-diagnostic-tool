@@ -695,4 +695,26 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.execute('select is_canonical from templates where id=?',(new_tid,)).fetchone()['is_canonical'],1)
         self.assertEqual(self.db.execute('select code from domains where id=?',(domain,)).fetchone()['code'],'stale-code')
 
+    # --- Lot 2b (modularisation, AUDIT_MODULARISATION_8800.md) : branchement de la
+    # detection canonique sur model_key/is_canonical a la place du nom ---
+
+    def test_renamed_reference_template_stays_protected_from_deletion(self):
+        tid=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        self.db.execute("update templates set name=? where id=?",('EPC / SENEVAL (renomme)',tid)); self.db.commit()
+        self.assertEqual(app.delete_template(self.db,tid),'protected')
+
+    def test_renamed_reference_template_stays_ownerless_after_migration(self):
+        tid=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        self.db.execute("update templates set name=? where id=?",('EPC / SENEVAL (renomme)',tid)); self.db.commit()
+        uid=self._mk_user('u-first-account'); self.db.commit()
+        app.migrate_v2_ownership(self.db)
+        self.assertIsNone(self.db.execute('select owner_user_id from templates where id=?',(tid,)).fetchone()['owner_user_id'])
+
+    def test_migrate_v2_ownership_still_assigns_custom_templates(self):
+        tid=app.create_blank_template(self.db,{'name':'Modele perso ownership'})
+        self.db.commit()
+        uid=self._mk_user('u-second-account'); self.db.commit()
+        app.migrate_v2_ownership(self.db)
+        self.assertEqual(self.db.execute('select owner_user_id from templates where id=?',(tid,)).fetchone()['owner_user_id'],uid)
+
 if __name__=='__main__': unittest.main()

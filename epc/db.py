@@ -169,8 +169,13 @@ def init_db(db: sqlite3.Connection) -> None:
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
     ensure_reference_questionnaire_version(db)
-    migrate_v2_ownership(db)
+    # Must run before migrate_v2_ownership(): that function now decides by model_key
+    # (see ensure_model_identity's docstring), so the flag has to be current first —
+    # otherwise, on the very first call after upgrading an existing database, the
+    # EPC/SENEVAL rows would still show model_key=NULL and be wrongly treated as
+    # ownerless-assignable.
     ensure_model_identity(db)
+    migrate_v2_ownership(db)
 
 
 def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:
@@ -220,12 +225,18 @@ def migrate_v2_ownership(db: sqlite3.Connection) -> None:
     while no account exists yet). This is what lets the pilot who completes
     the first-run setup immediately keep the workshops/questionnaires that
     already existed before authentication was introduced.
+
+    Identifies the shared EPC/SENEVAL model(s) by model_key rather than by name
+    (lot 2b, cf. AUDIT_MODULARISATION_8800.md): unlike name, model_key survives a
+    rename via PUT /api/templates/{id}, so a renamed reference questionnaire stays
+    correctly excluded from personal ownership. Requires ensure_model_identity()
+    to have already run in this same init_db() call (see caller).
     """
     user = db.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
     if not user:
         return
     if db.execute("SELECT 1 FROM sessions WHERE owner_user_id IS NULL LIMIT 1").fetchone() is None \
-            and db.execute("SELECT 1 FROM templates WHERE owner_user_id IS NULL AND name != 'EPC / SENEVAL' LIMIT 1").fetchone() is None:
+            and db.execute("SELECT 1 FROM templates WHERE owner_user_id IS NULL AND (model_key IS NULL OR model_key!=?) LIMIT 1", (MODEL_KEY_EPC_SENEVAL,)).fetchone() is None:
         return
     if DATABASE.exists():
         backup = DATABASE.with_name(f"{DATABASE.stem}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}{DATABASE.suffix}")
@@ -236,7 +247,7 @@ def migrate_v2_ownership(db: sqlite3.Connection) -> None:
     db.execute("UPDATE sessions SET owner_user_id=? WHERE owner_user_id IS NULL", (user["id"],))
     # The reference EPC/SENEVAL template stays a common model (owner NULL); only
     # personal/custom questionnaires get attached to the first account.
-    db.execute("UPDATE templates SET owner_user_id=? WHERE owner_user_id IS NULL AND name != 'EPC / SENEVAL'", (user["id"],))
+    db.execute("UPDATE templates SET owner_user_id=? WHERE owner_user_id IS NULL AND (model_key IS NULL OR model_key!=?)", (user["id"], MODEL_KEY_EPC_SENEVAL))
     db.commit()
 
 
