@@ -84,6 +84,11 @@ from epc.qualitatif import (
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
 )
 from epc.scoring import grade, analysis, analysis_for
+from epc.profile import (
+    create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
+    create_profile_field, update_profile_field, delete_profile_field,
+    set_participant_profile_values, get_participant_profile_values,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -985,6 +990,10 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/templates/") and path.endswith("/matrix.xlsx"):
                 template=template_payload(db,path.split("/")[3]); data=matrix_xlsx(template); name=export_filename(template["name"],"matrice-questionnaire", ext="xlsx"); self.send_response(200); self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); self.send_header("Content-Disposition",f"attachment; filename={name}"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/templates/"): return self.json(200, template_payload(db, path.rsplit("/", 1)[1]) or {"error": "Configuration introuvable"})
+            if path == "/api/profile-schemas":
+                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,description,owner_user_id,created_at,updated_at FROM profile_schemas ORDER BY name"))
+                return self.json(200, rows(db, "SELECT id,name,description,owner_user_id,created_at,updated_at FROM profile_schemas WHERE owner_user_id IS NULL OR owner_user_id=? ORDER BY name", (user["id"],)))
+            if path.startswith("/api/profile-schemas/"): return self.json(200, profile_schema_payload(db, path.rsplit("/", 1)[1]) or {"error": "Profil introuvable"})
             if path == "/api/sessions":
                 if user["role"] == "admin": return self.json(200, rows(db, "SELECT * FROM sessions ORDER BY created_at DESC"))
                 return self.json(200, rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
@@ -1266,6 +1275,9 @@ class Handler(SimpleHTTPRequestHandler):
                 tid=path.split("/")[3]; return self.json(201,{"id":create_domain(db, tid, data)})
             if path.startswith("/api/domains/") and path.endswith("/indicators"):
                 did=path.split("/")[3]; return self.json(201,{"id":create_indicator(db, did, data)})
+            if path == "/api/profile-schemas": return self.json(201,{"id":create_profile_schema(db,user["id"],data)})
+            if path.startswith("/api/profile-schemas/") and path.endswith("/fields"):
+                return self.json(201,{"id":create_profile_field(db,path.split("/")[3],data)})
             if path == "/api/sessions":
                 sid = create_session(db, user["id"], data)
                 if sid is None: return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
@@ -1280,6 +1292,8 @@ class Handler(SimpleHTTPRequestHandler):
                 sid = path.split("/")[3]; submit_response(db, sid, data); return self.json(200, {"ok": True})
             if path.endswith("/complete"):
                 complete_participant(db, data["participantId"]); return self.json(200, {"ok": True})
+            if path.startswith("/api/participants/") and path.endswith("/profile"):
+                pid=path.split("/")[3]; set_participant_profile_values(db, pid, data.get("values") or {}); return self.json(200, {"ok": True})
             if path.endswith("/status"):
                 sid = path.split("/")[3]; status = data["status"]; db.execute("UPDATE sessions SET status=?,closed_at=? WHERE id=?", (status, now() if status == "closed" else None, sid)); db.commit(); return self.json(200, {"ok": True})
             if path.endswith("/priorities"):
@@ -1356,6 +1370,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if not (data.get("code") or "").strip(): return self.json(400,{"error":"La référence est obligatoire."})
                 if not (data.get("label") or "").strip(): return self.json(400,{"error":"La question est obligatoire."})
                 update_indicator(db, iid, data); return self.json(200,{"ok":True})
+            if path.startswith("/api/profile-schemas/"):
+                update_profile_schema(db, path.split("/")[3], data); return self.json(200,{"ok":True})
+            if path.startswith("/api/profile-fields/"):
+                update_profile_field(db, path.split("/")[3], data); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})
@@ -1425,6 +1443,16 @@ class Handler(SimpleHTTPRequestHandler):
                 for table in SESSION_CHILD_TABLES:
                     db.execute(f"DELETE FROM {table} WHERE session_id=?",(sid,))
                 db.execute("DELETE FROM sessions WHERE id=?",(sid,)); db.commit(); return self.json(200,{"ok":True})
+            if path.startswith("/api/profile-schemas/"):
+                result = delete_profile_schema(db, path.split("/")[3])
+                if result == "in_use": return self.json(409,{"error":"Suppression impossible. Ce profil est utilisé par un atelier ou par des réponses déjà enregistrées."})
+                return self.json(200,{"ok":True})
+            if path.startswith("/api/profile-fields/"):
+                fid=path.split("/")[3]
+                deleted, used = delete_profile_field(db, fid)
+                if not deleted:
+                    return self.json(409,{"error":f"Suppression impossible : {used} réponse(s) sont déjà enregistrées pour ce champ.","dependencies":used})
+                return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})
         except sqlite3.IntegrityError: return self.json(409, {"error": "Action impossible : cette donnée est encore utilisée ailleurs."})

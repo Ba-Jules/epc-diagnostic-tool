@@ -148,6 +148,9 @@ def init_db(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', display_name TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS auth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT, period_start TEXT, period_end TEXT, template_id TEXT NOT NULL REFERENCES templates(id), template_version INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS profile_schemas (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, owner_user_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS profile_fields (id TEXT PRIMARY KEY, schema_id TEXT NOT NULL REFERENCES profile_schemas(id), field_key TEXT NOT NULL, field_type TEXT NOT NULL, label TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 0, options_json TEXT NOT NULL DEFAULT '[]', display_order INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS participant_profile_values (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), participant_id TEXT NOT NULL REFERENCES participants(id), field_id TEXT NOT NULL REFERENCES profile_fields(id), value_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(participant_id, field_id));
     """)
     db.commit()
     existing_columns = {r["name"] for r in db.execute("PRAGMA table_info(participants)")}
@@ -155,7 +158,7 @@ def init_db(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE participants ADD COLUMN display_name TEXT")
         db.commit()
     session_columns = {r["name"] for r in db.execute("PRAGMA table_info(sessions)")}
-    for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER"), ("owner_user_id", "TEXT"), ("campaign_id", "TEXT"), ("group_code", "TEXT"), ("group_color", "TEXT"), ("relay_name", "TEXT"), ("relay_token_hash", "TEXT")):
+    for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER"), ("owner_user_id", "TEXT"), ("campaign_id", "TEXT"), ("group_code", "TEXT"), ("group_color", "TEXT"), ("relay_name", "TEXT"), ("relay_token_hash", "TEXT"), ("profile_schema_id", "TEXT")):
         if col not in session_columns:
             db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
     template_columns = {r["name"] for r in db.execute("PRAGMA table_info(templates)")}
@@ -165,6 +168,13 @@ def init_db(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE templates ADD COLUMN model_key TEXT")
     if "is_canonical" not in template_columns:
         db.execute("ALTER TABLE templates ADD COLUMN is_canonical INTEGER NOT NULL DEFAULT 0")
+    ppv_columns = {r["name"] for r in db.execute("PRAGMA table_info(participant_profile_values)")}
+    if ppv_columns and "session_id" not in ppv_columns:
+        # Table already existed (created before session_id was added to its schema);
+        # backfill from participants so cascade deletes (SESSION_CHILD_TABLES) can
+        # scope by session_id like every other participant-linked table already does.
+        db.execute("ALTER TABLE participant_profile_values ADD COLUMN session_id TEXT")
+        db.execute("UPDATE participant_profile_values SET session_id=(SELECT session_id FROM participants WHERE participants.id=participant_profile_values.participant_id) WHERE session_id IS NULL")
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)

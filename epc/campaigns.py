@@ -20,7 +20,8 @@ from .util import slugify
 # Every table that hangs off a session row via session_id — deleting a session (alone,
 # or as part of a campaign cascade) always means deleting exactly these first.
 SESSION_CHILD_TABLES = ("training_topics", "workshop_recommendations", "analysis_entries", "priority_analyses",
-                         "analysis_notes", "recommendations", "responses", "priorities", "participants", "session_report_meta")
+                         "analysis_notes", "recommendations", "responses", "participant_profile_values",
+                         "priorities", "participants", "session_report_meta")
 
 GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#ea580c", "#4338ca"]
 
@@ -166,10 +167,10 @@ def create_group(db: sqlite3.Connection, campaign, owner_user_id: str, data: dic
     group_color = GROUP_COLORS[len(campaign_codes) % len(GROUP_COLORS)]
     sid = str(uuid.uuid4())
     raw_token = secrets.token_urlsafe(24)
-    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO sessions (id,template_id,template_version,name,organization,location,date,status,created_at,closed_at,description,expected_participants,owner_user_id,campaign_id,group_code,group_color,relay_name,relay_token_hash,profile_schema_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, campaign["template_id"], campaign["template_version"], data["name"], "", "", "", "open", now(), None, "",
          int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None,
-         owner_user_id, campaign["id"], group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token)))
+         owner_user_id, campaign["id"], group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token), data.get("profileSchemaId")))
     db.commit()
     return {"id": sid, "groupCode": group_code, "groupColor": group_color, "relayToken": raw_token}
 
@@ -188,9 +189,9 @@ def create_session(db: sqlite3.Connection, owner_user_id: str, data: dict):
     if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]):
         return None
     sid = str(uuid.uuid4())
-    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO sessions (id,template_id,template_version,name,organization,location,date,status,created_at,closed_at,description,expected_participants,owner_user_id,campaign_id,group_code,group_color,relay_name,relay_token_hash,profile_schema_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""),
-         int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, owner_user_id, None, None, None, None, None))
+         int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, owner_user_id, None, None, None, None, None, data.get("profileSchemaId")))
     db.commit()
     return sid
 
@@ -199,14 +200,24 @@ def update_session(db: sqlite3.Connection, session_id: str, data: dict) -> bool:
     """Returns False (no mutation) if a requested templateId doesn't exist,
     same refusal as the historical route."""
     expected = int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None
+    # profileSchemaId is a new, not-yet-frontend-wired field (lot 4a): unlike the
+    # older fields below (which the existing edit form always resends in full),
+    # a caller that omits it entirely must not silently wipe a value set elsewhere
+    # (e.g. by create_group/create_session) - only an explicit key (including an
+    # explicit null, to clear it) changes it.
+    if "profileSchemaId" in data:
+        profile_schema_id = data["profileSchemaId"]
+    else:
+        current = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+        profile_schema_id = current["profile_schema_id"] if current else None
     if data.get("templateId"):
         tpl = db.execute("SELECT version FROM templates WHERE id=?", (data["templateId"],)).fetchone()
         if not tpl:
             return False
-        db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,template_id=?,template_version=? WHERE id=?",
-            (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, data["templateId"], tpl["version"], session_id))
+        db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,template_id=?,template_version=?,profile_schema_id=? WHERE id=?",
+            (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, data["templateId"], tpl["version"], profile_schema_id, session_id))
     else:
-        db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",
-            (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, session_id))
+        db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,profile_schema_id=? WHERE id=?",
+            (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, profile_schema_id, session_id))
     db.commit()
     return True

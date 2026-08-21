@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 
 from .db import now, template_payload
+from .profile import get_participant_profile_values, profile_schema_payload
 
 
 class CollecteClosedError(Exception):
@@ -48,9 +49,15 @@ def update_participant_display_name(db: sqlite3.Connection, participant_id: str,
 def participant_resume(db: sqlite3.Connection, session_id: str, participant_id: str) -> dict:
     participant = db.execute("SELECT * FROM participants WHERE id=? AND session_id=?", (participant_id, session_id)).fetchone()
     session = db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+    # profile/profileValues are additive (lot 4a): a session without profile_schema_id
+    # (the default, unchanged for every pre-existing session) yields None/{} exactly
+    # as if these two keys didn't exist, so older clients ignoring them are unaffected.
+    schema_id = session["profile_schema_id"] if session else None
     return {
         "session": dict(session) if session else None,
         "participant": dict(participant) if participant else None,
         "template": template_payload(db, session["template_id"]) if session else None,
         "responses": {r["indicator_id"]: json.loads(r["value_json"]) for r in db.execute("SELECT * FROM responses WHERE participant_id=?", (participant_id,))},
+        "profile": profile_schema_payload(db, schema_id) if schema_id else None,
+        "profileValues": get_participant_profile_values(db, participant_id) if participant else {},
     }

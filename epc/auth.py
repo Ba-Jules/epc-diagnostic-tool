@@ -39,6 +39,8 @@ def is_public_api(path: str, method: str) -> bool:
         return True
     if path.startswith("/api/sessions/") and method == "POST" and (path.endswith("/participants") or path.endswith("/responses") or path.endswith("/complete")):
         return True
+    if path.startswith("/api/participants/") and method == "POST" and path.endswith("/profile"):
+        return True
     return False
 
 
@@ -101,6 +103,10 @@ def enforce_ownership(path: str, db: sqlite3.Connection, user) -> None:
     elif path.startswith("/api/campaigns/") and len(parts) > 3 and parts[3]:
         row = db.execute("SELECT owner_user_id FROM campaigns WHERE id=?", (parts[3],)).fetchone()
         if row and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
+            raise PermissionDeniedError()
+    elif path.startswith("/api/profile-schemas/") and len(parts) > 3 and parts[3]:
+        row = db.execute("SELECT owner_user_id FROM profile_schemas WHERE id=?", (parts[3],)).fetchone()
+        if row and row["owner_user_id"] is not None and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
             raise PermissionDeniedError()
 
 

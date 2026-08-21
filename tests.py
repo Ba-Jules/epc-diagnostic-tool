@@ -10,9 +10,9 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.db=app.connect(Path(self.tmp.name)/'test.sqlite3'); app.init_db(self.db)
     def tearDown(self): self.db.close(); self.tmp.cleanup()
-    def _mk_session(self,sid,name='test',campaign_id=None,group_code=None,expected=None,owner=None):
+    def _mk_session(self,sid,name='test',campaign_id=None,group_code=None,expected=None,owner=None,profile_schema_id=None):
         t=self.db.execute('select id,version from templates').fetchone()
-        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],name,'','','', 'open',app.now(),None,'',expected,owner,campaign_id,group_code,None,None,None))
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],name,'','','', 'open',app.now(),None,'',expected,owner,campaign_id,group_code,None,None,None,profile_schema_id))
         return t['id']
     def _mk_user(self,uid,email=None,role='pilote'):
         h,salt=app.hash_password('motdepasse123')
@@ -35,7 +35,7 @@ class EngineTests(unittest.TestCase):
         t=self.db.execute('select id from templates').fetchone()['id']; payload=app.template_payload(self.db,t)
         self.assertEqual(len(payload['domains']),7); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),70)
     def test_grade_and_analysis_keep_raw_responses(self):
-        t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None))
+        t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         for n,v in [('a',1),('b',5)]:
             pid=n; self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,n,'completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,inds,str(v),'numeric',app.now(),app.now()))
@@ -44,7 +44,7 @@ class EngineTests(unittest.TestCase):
     def test_reference_questionnaire_fix_never_touches_existing_version(self):
         t=self.db.execute('select id,version from templates').fetchone()
         sid='pinned-session'
-        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None))
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None))
         domain=self.db.execute('select id from domains where template_id=? order by display_order limit 1',(t['id'],)).fetchone()['id']
         indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         self.db.execute('insert into participants values(?,?,?,?,?,?,?)',('p',sid,'p','completed',app.now(),app.now(),None))
@@ -65,7 +65,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.execute('select template_version from sessions where id=?',(sid,)).fetchone()['template_version'],t['version'])
     def test_qualitative_chain_is_persistent_and_exported(self):
         t=self.db.execute('select id,version from templates').fetchone(); sid='qualitative-session'
-        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None))
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; indicator=self.db.execute('select id from indicators where domain_id=? limit 1',(domain,)).fetchone()['id']
         self.db.execute('insert into priorities values(?,?,?,?,?,?)',('priority',sid,domain,indicator,1,app.now()))
         self.db.execute('insert into priority_analyses values(?,?,?,?,?,?)',('analysis',sid,'priority','Constat',app.now(),app.now()))
@@ -829,5 +829,158 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(rows_),2)
         self.assertEqual(rows_[-1]['id'],new_tid)
         self.assertEqual(rows_[-1]['name'],'EPC / SENEVAL (renomme)')
+
+    # --- Lot 4a (modularisation, AUDIT_MODULARISATION_8800.md) : profil participant
+    # composable, backend seul, desactive par defaut (sessions.profile_schema_id NULL) ---
+
+    def _mk_schema_with_fields(self,owner='owner-profile'):
+        schema_id=app.create_profile_schema(self.db,owner,{'name':'Profil standard'})
+        text_id=app.create_profile_field(self.db,schema_id,{'fieldType':'text','label':'Organisation'})
+        num_id=app.create_profile_field(self.db,schema_id,{'fieldType':'number','label':'Age','required':True})
+        single_id=app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Genre','options':['F','M','Autre']})
+        multi_id=app.create_profile_field(self.db,schema_id,{'fieldType':'multi_choice','label':'Langues','options':['fr','wo','en']})
+        self.db.commit()
+        return schema_id,{'organisation':text_id,'age':num_id,'genre':single_id,'langues':multi_id}
+
+    def test_create_profile_schema_requires_a_name(self):
+        with self.assertRaises(ValueError):
+            app.create_profile_schema(self.db,'owner-x',{'name':''})
+
+    def test_profile_field_types_require_options_for_choice_fields(self):
+        schema_id=app.create_profile_schema(self.db,'owner-x',{'name':'Profil'}); self.db.commit()
+        with self.assertRaises(ValueError):
+            app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Genre','options':[]})
+        with self.assertRaises(ValueError):
+            app.create_profile_field(self.db,schema_id,{'fieldType':'bogus_type','label':'X'})
+
+    def test_profile_schema_payload_lists_typed_fields_in_order(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        payload=app.profile_schema_payload(self.db,schema_id)
+        self.assertEqual(payload['name'],'Profil standard')
+        self.assertEqual([f['field_type'] for f in payload['fields']],['text','number','single_choice','multi_choice'])
+        self.assertEqual(payload['fields'][2]['options'],['F','M','Autre'])
+
+    def test_update_and_delete_profile_field(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        app.update_profile_field(self.db,fields['organisation'],{'label':'Organisation renommee'})
+        self.assertEqual(self.db.execute('select label from profile_fields where id=?',(fields['organisation'],)).fetchone()['label'],'Organisation renommee')
+        deleted,used=app.delete_profile_field(self.db,fields['organisation'])
+        self.assertTrue(deleted); self.assertEqual(used,0)
+
+    def test_delete_profile_field_blocked_once_a_value_exists(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-profile-del-field'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        app.set_participant_profile_values(self.db,pid,{'organisation':'ONG Test'})
+        deleted,used=app.delete_profile_field(self.db,fields['organisation'])
+        self.assertFalse(deleted); self.assertEqual(used,1)
+
+    def test_delete_profile_schema_blocked_when_session_uses_it(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        self._mk_session('sess-profile-del-schema',profile_schema_id=schema_id)
+        self.assertEqual(app.delete_profile_schema(self.db,schema_id),'in_use')
+
+    def test_delete_profile_schema_succeeds_when_unused(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        self.assertEqual(app.delete_profile_schema(self.db,schema_id),'deleted')
+        self.assertIsNone(self.db.execute('select id from profile_schemas where id=?',(schema_id,)).fetchone())
+
+    def test_set_participant_profile_values_validates_each_type(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-profile-values'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        app.set_participant_profile_values(self.db,pid,{'organisation':'ONG Test','age':34,'genre':'F','langues':['fr','wo']})
+        values=app.get_participant_profile_values(self.db,pid)
+        self.assertEqual(values,{'organisation':'ONG Test','age':34,'genre':'F','langues':['fr','wo']})
+        # upsert: resubmitting a field updates rather than duplicates
+        app.set_participant_profile_values(self.db,pid,{'age':35})
+        self.assertEqual(app.get_participant_profile_values(self.db,pid)['age'],35)
+        self.assertEqual(self.db.execute('select count(*) from participant_profile_values where participant_id=?',(pid,)).fetchone()[0],4)
+
+    def test_set_participant_profile_values_rejects_invalid_type_and_choice(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-profile-invalid'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        with self.assertRaises(ValueError): app.set_participant_profile_values(self.db,pid,{'age':'not-a-number'})
+        with self.assertRaises(ValueError): app.set_participant_profile_values(self.db,pid,{'genre':'Inconnu'})
+        with self.assertRaises(ValueError): app.set_participant_profile_values(self.db,pid,{'langues':['fr','klingon']})
+        with self.assertRaises(ValueError): app.set_participant_profile_values(self.db,pid,{'unknown_field':'x'})
+
+    def test_set_participant_profile_values_enforces_required(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-profile-required'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        with self.assertRaises(ValueError): app.set_participant_profile_values(self.db,pid,{'age':None})
+        app.set_participant_profile_values(self.db,pid,{'organisation':''})  # optional field: empty is fine
+        self.assertEqual(app.get_participant_profile_values(self.db,pid),{})
+
+    def test_participant_resume_includes_profile_when_session_has_a_schema(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-profile-resume'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        app.set_participant_profile_values(self.db,pid,{'organisation':'ONG Test'})
+        resume=app.participant_resume(self.db,sid,pid)
+        self.assertEqual(resume['profile']['name'],'Profil standard')
+        self.assertEqual(resume['profileValues'],{'organisation':'ONG Test'})
+
+    def test_participant_resume_omits_profile_for_pre_existing_sessions(self):
+        # Migration safety: a session created before this feature (profile_schema_id
+        # NULL, the only possible value before lot 4a) must resume exactly as before.
+        sid='sess-no-profile'; self._mk_session(sid)
+        pid=app.create_participant(self.db,sid,{})['id']
+        resume=app.participant_resume(self.db,sid,pid)
+        self.assertIsNone(resume['profile'])
+        self.assertEqual(resume['profileValues'],{})
+
+    def test_set_participant_profile_values_refused_without_a_schema(self):
+        sid='sess-no-profile-2'; self._mk_session(sid)
+        pid=app.create_participant(self.db,sid,{})['id']
+        with self.assertRaises(ValueError):
+            app.set_participant_profile_values(self.db,pid,{'organisation':'x'})
+
+    def test_profile_submission_route_is_public(self):
+        # Privacy/access check (audit: "aucune fuite relais/export") from the other
+        # direction - a participant must be able to submit their OWN profile without
+        # a pilot cookie, exactly like responses/complete already are.
+        self.assertTrue(app.is_public_api('/api/participants/some-id/profile','POST'))
+        self.assertFalse(app.is_public_api('/api/participants/some-id/profile','GET'))
+        self.assertFalse(app.is_public_api('/api/profile-schemas','GET'))
+        self.assertFalse(app.is_public_api('/api/profile-schemas','POST'))
+
+    def test_relay_payload_never_includes_participant_profile_data(self):
+        # Privacy check called out by the audit ("aucune fuite relais/export"): the
+        # public relay dashboard only ever exposes aggregate counts, never
+        # per-participant details - confirmed by inspecting its actual key set.
+        schema_id,fields=self._mk_schema_with_fields()
+        cid='camp-relay-privacy'; uid=self._mk_user('u-relay-privacy')
+        self._mk_campaign(cid,uid)
+        sid='sess-relay-privacy'; self._mk_session(sid,campaign_id=cid,profile_schema_id=schema_id)
+        self.db.execute("update sessions set relay_token_hash=? where id=?",(app.relay_token_hash('tok-privacy'),sid)); self.db.commit()
+        pid=app.create_participant(self.db,sid,{})['id']
+        app.set_participant_profile_values(self.db,pid,{'organisation':'Donnee privee'})
+        g=self.db.execute("SELECT s.*, c.name AS campaign_name FROM sessions s LEFT JOIN campaigns c ON c.id=s.campaign_id WHERE s.relay_token_hash=?",(app.relay_token_hash('tok-privacy'),)).fetchone()
+        self.assertIsNotNone(g)
+        relay_keys={'campaignName','groupName','relayName','groupCode','groupColor','expectedParticipants','participantCount','completedCount','participantLink'}
+        self.assertNotIn('profile',relay_keys); self.assertNotIn('profileValues',relay_keys)
+
+    def test_session_delete_cascade_removes_participant_profile_values(self):
+        # Reproduces a real bug caught manually while testing lot 4a: deleting a
+        # session/group/campaign cascades through SESSION_CHILD_TABLES, and
+        # participant_profile_values wasn't in that list - deleting participants
+        # while their profile values still referenced them raised a FK
+        # IntegrityError instead of cleanly cascading, for any session that had
+        # ever collected profile data. Also checks the FK-order-sensitive delete
+        # actually succeeds (not just that the table is listed).
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-cascade-profile'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        app.set_participant_profile_values(self.db,pid,{'organisation':'ONG Test'})
+        self.db.commit()
+        for table in app.SESSION_CHILD_TABLES:
+            self.db.execute(f"DELETE FROM {table} WHERE session_id=?",(sid,))
+        self.db.execute("DELETE FROM sessions WHERE id=?",(sid,))
+        self.db.commit()
+        self.assertEqual(self.db.execute('select count(*) from participant_profile_values where session_id=?',(sid,)).fetchone()[0],0)
+        self.assertIsNone(self.db.execute('select id from sessions where id=?',(sid,)).fetchone())
 
 if __name__=='__main__': unittest.main()
