@@ -355,8 +355,8 @@ class Handler(SimpleHTTPRequestHandler):
                 camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
                 return self.json(200, dict(camp) if camp else {"error": "Campagne introuvable"})
             if path == "/api/templates":
-                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' ORDER BY name,version DESC"))
-                return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY name,version DESC", (user["id"],)))
+                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,version,description,status,model_key,is_canonical,created_at,updated_at FROM templates WHERE status='active' ORDER BY name,version DESC"))
+                return self.json(200, rows(db, "SELECT id,name,version,description,status,model_key,is_canonical,created_at,updated_at FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY name,version DESC", (user["id"],)))
             if path == "/api/templates/matrix.xlsx":
                 data=blank_matrix_xlsx(); name=export_filename("matrice-questionnaire-vierge", ext="xlsx"); self.send_response(200); self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); self.send_header("Content-Disposition",f"attachment; filename={name}"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/templates/") and path.endswith("/matrix.xlsx"):
