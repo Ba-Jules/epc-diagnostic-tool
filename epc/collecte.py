@@ -10,7 +10,7 @@ import json
 import sqlite3
 import uuid
 
-from .db import now, template_payload
+from .db import now, rows, template_payload
 from .profile import get_participant_profile_values, profile_schema_payload
 
 
@@ -61,3 +61,14 @@ def participant_resume(db: sqlite3.Connection, session_id: str, participant_id: 
         "profile": profile_schema_payload(db, schema_id) if schema_id else None,
         "profileValues": get_participant_profile_values(db, participant_id) if participant else {},
     }
+
+
+def list_session_participants(db: sqlite3.Connection, session_id: str) -> list[dict]:
+    """Pilot-facing roster (lot 4c): every participant of a session with their
+    profile values merged in, if the session has a profile schema attached."""
+    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    schema_id = session["profile_schema_id"] if session else None
+    participants = rows(db, "SELECT * FROM participants WHERE session_id=? ORDER BY started_at", (session_id,))
+    for p in participants:
+        p["profileValues"] = get_participant_profile_values(db, p["id"]) if schema_id else {}
+    return participants

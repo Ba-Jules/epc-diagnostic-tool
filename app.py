@@ -74,7 +74,7 @@ from epc.campaigns import (
 )
 from epc.collecte import (
     CollecteClosedError, create_participant, submit_response, complete_participant,
-    update_participant_display_name, participant_resume,
+    update_participant_display_name, participant_resume, list_session_participants,
 )
 from epc.qualitatif import (
     toggle_priority, delete_priority, upsert_priority_analysis, update_priority_analysis,
@@ -997,6 +997,8 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/sessions":
                 if user["role"] == "admin": return self.json(200, rows(db, "SELECT * FROM sessions ORDER BY created_at DESC"))
                 return self.json(200, rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
+            if path.startswith("/api/sessions/") and path.endswith("/participants"):
+                return self.json(200, list_session_participants(db, path.split("/")[3]))
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
                 result = analysis(db, path.split("/")[3]); return self.json(200, result or {"error": "Session introuvable"})
             if path.startswith("/api/sessions/") and path.endswith("/workshop-data"):

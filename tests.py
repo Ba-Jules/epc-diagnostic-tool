@@ -983,4 +983,34 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.execute('select count(*) from participant_profile_values where session_id=?',(sid,)).fetchone()[0],0)
         self.assertIsNone(self.db.execute('select id from sessions where id=?',(sid,)).fetchone())
 
+    # --- Lot 4c (modularisation, AUDIT_MODULARISATION_8800.md) : liste des participants
+    # (pilote) avec valeurs de profil - epc/collecte.py list_session_participants() ---
+
+    def test_list_session_participants_includes_profile_values(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-roster'; self._mk_session(sid,profile_schema_id=schema_id)
+        p1=app.create_participant(self.db,sid,{'displayName':'Awa'})['id']
+        app.set_participant_profile_values(self.db,p1,{'organisation':'ONG A','age':40})
+        p2=app.create_participant(self.db,sid,{})['id']
+        roster=app.list_session_participants(self.db,sid)
+        self.assertEqual(len(roster),2)
+        byId={p['id']:p for p in roster}
+        self.assertEqual(byId[p1]['profileValues'],{'organisation':'ONG A','age':40})
+        self.assertEqual(byId[p2]['profileValues'],{})
+        self.assertEqual(byId[p1]['display_name'],'Awa')
+
+    def test_list_session_participants_empty_profile_values_without_schema(self):
+        sid='sess-roster-no-profile'; self._mk_session(sid)
+        pid=app.create_participant(self.db,sid,{})['id']
+        roster=app.list_session_participants(self.db,sid)
+        self.assertEqual(len(roster),1)
+        self.assertEqual(roster[0]['profileValues'],{})
+
+    def test_list_session_participants_ordered_by_start_time(self):
+        sid='sess-roster-order'; self._mk_session(sid)
+        first=app.create_participant(self.db,sid,{})['id']
+        second=app.create_participant(self.db,sid,{})['id']
+        roster=app.list_session_participants(self.db,sid)
+        self.assertEqual([p['id'] for p in roster],[first,second])
+
 if __name__=='__main__': unittest.main()
