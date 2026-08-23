@@ -68,6 +68,7 @@ from epc.qualitatif import (
     create_workshop_recommendation, update_workshop_recommendation, delete_workshop_recommendation,
     create_training_topic, update_training_topic, delete_training_topic,
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
+    migrate_legacy_qualitative_data,
 )
 from epc.scoring import grade, analysis, analysis_for, dimension_analysis, MIN_COHORT_N
 from epc.profile import (

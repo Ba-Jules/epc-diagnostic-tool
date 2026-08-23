@@ -17,7 +17,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 
-from .db import now
+from .db import now, rows
 
 
 def toggle_priority(db: sqlite3.Connection, session_id: str, data: dict) -> None:
@@ -139,3 +139,97 @@ def create_legacy_recommendation(db: sqlite3.Connection, session_id: str, data: 
     db.execute("INSERT INTO recommendations VALUES (?,?,?,?,?,?,?,?,?,?)",
         (str(uuid.uuid4()), session_id, data.get("indicatorId"), data["title"], data.get("description", ""), data.get("lever", ""), data.get("kind", "action"), data.get("owner", ""), data.get("horizon", ""), now()))
     db.commit()
+
+
+# --- Migration V1 -> V2 (lot 7, cf. AUDIT_MODULARISATION_8800.md) ---
+# analysis_notes/recommendations ("V1") are superseded by analysis_entries/
+# workshop_recommendations ("V2", the only source the final report reads via
+# qualitative_data()) but were left both live in the UI - a moderator using
+# the V1 "Causes et recommandations" form (now removed from domainDiagnostic,
+# see the frontend bugfix commit) had their work silently absent from every
+# export. migrate_legacy_qualitative_data() copies any V1 rows forward so
+# nothing already captured is lost; it does not delete or alter V1 rows.
+
+LEGACY_NOTE_KIND_MAP = {
+    "Cause": "cause", "Cause racine potentielle": "cause", "Symptôme": "cause",
+    "Facteur externe": "cause", "Hypothèse": "cause",
+    "Conséquence": "consequence", "Levier": "lever",
+}
+LEGACY_NOTE_STATUS_MAP = {"HYPOTHESE": "A_DISCUTER", "FAIT_VALIDE": "RETENU"}
+LEGACY_RECOMMENDATION_CATEGORY_MAP = {"formation": "Formation", "organisation": "Organisation", "gouvernance": "Gouvernance", "action": "Autre", "autre": "Autre"}
+
+
+def _ensure_priority_for_indicator(db: sqlite3.Connection, session_id: str, indicator_id: str) -> str | None:
+    """V1 rows attach to an indicator_id directly; V2 rows attach to a
+    priority_id (a domain_id+indicator_id pair the group explicitly
+    selected). If this indicator was never separately selected as a
+    priority, create one (votes=0) so the migrated content has somewhere to
+    attach - additive, matches this codebase's other historical-preservation
+    migrations (never destructive, never re-interprets existing data)."""
+    existing = db.execute("SELECT id FROM priorities WHERE session_id=? AND indicator_id=?", (session_id, indicator_id)).fetchone()
+    if existing:
+        return existing["id"]
+    indicator = db.execute("SELECT domain_id FROM indicators WHERE id=?", (indicator_id,)).fetchone()
+    if not indicator:
+        return None
+    pid = str(uuid.uuid4())
+    db.execute("INSERT INTO priorities VALUES (?,?,?,?,?,?)", (pid, session_id, indicator["domain_id"], indicator_id, 0, now()))
+    return pid
+
+
+def migrate_legacy_qualitative_data(db: sqlite3.Connection, session_id: str | None = None) -> dict:
+    """One-off, explicit migration from the legacy V1 qualitative tables to
+    the V2 ones. NEVER called automatically (no init_db/startup hook) - run
+    it deliberately via scripts/migrate_legacy_qualitative.py after
+    reviewing what it reports, exactly what the audit calls for
+    ("dépréciation... seulement après migration vérifiée"). session_id=None
+    migrates every session in the database.
+
+    Idempotent: a V1 row already matched by an existing V2 row with the same
+    session_id and content/title+description is skipped, so running this
+    twice does not duplicate data. V1 rows are only ever read, never
+    modified or deleted - true backward compatibility, not a destructive
+    cutover.
+    """
+    where = "WHERE session_id=?" if session_id else ""
+    params = (session_id,) if session_id else ()
+    notes = rows(db, f"SELECT * FROM analysis_notes {where}", params)
+    recommendations = rows(db, f"SELECT * FROM recommendations {where}", params)
+    migrated_entries = migrated_recommendations = skipped_entries = 0
+
+    for n in notes:
+        if not n["indicator_id"]:
+            skipped_entries += 1
+            continue
+        if db.execute("SELECT 1 FROM analysis_entries WHERE session_id=? AND content=?", (n["session_id"], n["content"])).fetchone():
+            continue
+        priority_id = _ensure_priority_for_indicator(db, n["session_id"], n["indicator_id"])
+        if not priority_id:
+            skipped_entries += 1
+            continue
+        kind = LEGACY_NOTE_KIND_MAP.get(n["kind"], "cause")
+        stamp = now()
+        db.execute("INSERT INTO analysis_entries VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), n["session_id"], priority_id, None, kind, n["content"],
+             n["kind"] if kind == "cause" else None, None, LEGACY_NOTE_STATUS_MAP.get(n["validation_status"], "A_DISCUTER"), stamp, stamp))
+        migrated_entries += 1
+
+    for r in recommendations:
+        if db.execute("SELECT 1 FROM workshop_recommendations WHERE session_id=? AND title=? AND description=?", (r["session_id"], r["title"], r["description"])).fetchone():
+            continue
+        priority_id = _ensure_priority_for_indicator(db, r["session_id"], r["indicator_id"]) if r["indicator_id"] else None
+        description = r["description"] or ""
+        if r["lever"]:
+            description = (description + f"\n\nLevier (V1) : {r['lever']}").strip()
+        stamp = now()
+        db.execute("INSERT INTO workshop_recommendations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), r["session_id"], priority_id, None, None, r["title"], description,
+             LEGACY_RECOMMENDATION_CATEGORY_MAP.get(r["kind"], "Autre"), "Non définie", r["owner"] or None, r["horizon"] or None, None, "Proposée", r["created_at"] or stamp, stamp))
+        migrated_recommendations += 1
+
+    db.commit()
+    return {
+        "totalNotes": len(notes), "totalRecommendations": len(recommendations),
+        "migratedEntries": migrated_entries, "migratedRecommendations": migrated_recommendations,
+        "skippedEntries": skipped_entries,
+    }

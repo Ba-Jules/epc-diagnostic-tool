@@ -1122,6 +1122,97 @@ class EngineTests(unittest.TestCase):
         sid='sess-dim-regression'; self._mk_dimension_session(sid)
         self.assertEqual(app.analysis_for(self.db,[sid]),app.analysis_for(self.db,[sid],participant_ids=None))
 
+    # --- Lot 7 (modularisation, AUDIT_MODULARISATION_8800.md) : migration V1
+    # (analysis_notes/recommendations) -> V2 (analysis_entries/
+    # workshop_recommendations) - epc/qualitatif.py
+    # migrate_legacy_qualitative_data(), jamais appelee automatiquement ---
+
+    def test_migrate_creates_analysis_entry_and_auto_priority_when_none_exists(self):
+        sid='sess-migrate-1'; self._mk_session(sid)
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.create_analysis_note(self.db,sid,{'indicatorId':indicator,'kind':'Cause racine potentielle','content':'Constat V1','validationStatus':'FAIT_VALIDE'})
+        self.assertIsNone(self.db.execute('select id from priorities where session_id=? and indicator_id=?',(sid,indicator)).fetchone())
+        result=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        self.assertEqual(result['migratedEntries'],1)
+        self.assertEqual(result['skippedEntries'],0)
+        priority=self.db.execute('select id from priorities where session_id=? and indicator_id=?',(sid,indicator)).fetchone()
+        self.assertIsNotNone(priority)
+        entry=self.db.execute('select * from analysis_entries where session_id=?',(sid,)).fetchone()
+        self.assertEqual(entry['priority_id'],priority['id'])
+        self.assertEqual(entry['kind'],'cause')
+        self.assertEqual(entry['item_type'],'Cause racine potentielle')
+        self.assertEqual(entry['content'],'Constat V1')
+        self.assertEqual(entry['validation_status'],'RETENU')
+
+    def test_migrate_reuses_existing_priority_for_the_same_indicator(self):
+        sid='sess-migrate-2'; self._mk_session(sid)
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.toggle_priority(self.db,sid,{'domainId':domain,'indicatorId':indicator,'votes':1})
+        existing_priority=self.db.execute('select id from priorities where session_id=? and indicator_id=?',(sid,indicator)).fetchone()['id']
+        app.create_analysis_note(self.db,sid,{'indicatorId':indicator,'kind':'Symptôme','content':'Deuxieme constat','validationStatus':'HYPOTHESE'})
+        app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        self.assertEqual(self.db.execute('select count(*) from priorities where session_id=?',(sid,)).fetchone()[0],1)
+        entry=self.db.execute('select * from analysis_entries where session_id=?',(sid,)).fetchone()
+        self.assertEqual(entry['priority_id'],existing_priority)
+        self.assertEqual(entry['validation_status'],'A_DISCUTER')
+
+    def test_migrate_recommendation_maps_category_and_folds_lever_into_description(self):
+        sid='sess-migrate-3'; self._mk_session(sid)
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.create_legacy_recommendation(self.db,sid,{'indicatorId':indicator,'title':'Reco V1','description':'Description V1','lever':'Levier libre V1','kind':'formation','owner':'Awa','horizon':'2026'})
+        result=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        self.assertEqual(result['migratedRecommendations'],1)
+        rec=self.db.execute('select * from workshop_recommendations where session_id=?',(sid,)).fetchone()
+        self.assertEqual(rec['title'],'Reco V1')
+        self.assertEqual(rec['category'],'Formation')
+        self.assertEqual(rec['owner'],'Awa')
+        self.assertEqual(rec['status'],'Proposée')
+        self.assertIn('Description V1',rec['description'])
+        self.assertIn('Levier (V1) : Levier libre V1',rec['description'])
+        self.assertIsNotNone(self.db.execute('select id from priorities where session_id=? and indicator_id=?',(sid,indicator)).fetchone())
+
+    def test_migrate_is_idempotent(self):
+        sid='sess-migrate-4'; self._mk_session(sid)
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.create_analysis_note(self.db,sid,{'indicatorId':indicator,'kind':'Cause','content':'Constat unique','validationStatus':'FAIT_VALIDE'})
+        app.create_legacy_recommendation(self.db,sid,{'indicatorId':indicator,'title':'Reco unique','description':'Desc unique','kind':'organisation'})
+        first=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        second=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        self.assertEqual(first['migratedEntries'],1); self.assertEqual(first['migratedRecommendations'],1)
+        self.assertEqual(second['migratedEntries'],0); self.assertEqual(second['migratedRecommendations'],0)
+        self.assertEqual(self.db.execute('select count(*) from analysis_entries where session_id=?',(sid,)).fetchone()[0],1)
+        self.assertEqual(self.db.execute('select count(*) from workshop_recommendations where session_id=?',(sid,)).fetchone()[0],1)
+
+    def test_migrate_skips_notes_without_an_indicator(self):
+        sid='sess-migrate-5'; self._mk_session(sid)
+        app.create_analysis_note(self.db,sid,{'kind':'Cause','content':'Constat orphelin'})
+        result=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        self.assertEqual(result['migratedEntries'],0); self.assertEqual(result['skippedEntries'],1)
+
+    def test_migrate_never_touches_v1_rows(self):
+        sid='sess-migrate-6'; self._mk_session(sid)
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.create_analysis_note(self.db,sid,{'indicatorId':indicator,'kind':'Cause','content':'Constat preserve'})
+        app.migrate_legacy_qualitative_data(self.db,session_id=sid)
+        self.assertEqual(self.db.execute('select count(*) from analysis_notes where session_id=?',(sid,)).fetchone()[0],1)
+
+    def test_migrate_session_scoping_leaves_other_sessions_untouched(self):
+        sid1='sess-migrate-scope-1'; sid2='sess-migrate-scope-2'
+        self._mk_session(sid1); self._mk_session(sid2)
+        domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
+        indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
+        app.create_analysis_note(self.db,sid1,{'indicatorId':indicator,'kind':'Cause','content':'Session 1'})
+        app.create_analysis_note(self.db,sid2,{'indicatorId':indicator,'kind':'Cause','content':'Session 2'})
+        result=app.migrate_legacy_qualitative_data(self.db,session_id=sid1)
+        self.assertEqual(result['migratedEntries'],1)
+        self.assertEqual(self.db.execute('select count(*) from analysis_entries where session_id=?',(sid1,)).fetchone()[0],1)
+        self.assertEqual(self.db.execute('select count(*) from analysis_entries where session_id=?',(sid2,)).fetchone()[0],0)
+
     # --- Lot 6 (modularisation, AUDIT_MODULARISATION_8800.md) : manifeste de
     # restitution - un seul modele (epc_seneval) existe aujourd'hui, son
     # manifeste doit lister exactement ce qui est deja rendu (aucun
