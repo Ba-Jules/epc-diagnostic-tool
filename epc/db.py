@@ -149,7 +149,7 @@ def init_db(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS auth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT, period_start TEXT, period_end TEXT, template_id TEXT NOT NULL REFERENCES templates(id), template_version INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS profile_schemas (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, owner_user_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS profile_fields (id TEXT PRIMARY KEY, schema_id TEXT NOT NULL REFERENCES profile_schemas(id), field_key TEXT NOT NULL, field_type TEXT NOT NULL, label TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 0, options_json TEXT NOT NULL DEFAULT '[]', display_order INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS profile_fields (id TEXT PRIMARY KEY, schema_id TEXT NOT NULL REFERENCES profile_schemas(id), field_key TEXT NOT NULL, field_type TEXT NOT NULL, label TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 0, options_json TEXT NOT NULL DEFAULT '[]', display_order INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, is_dimension INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS participant_profile_values (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), participant_id TEXT NOT NULL REFERENCES participants(id), field_id TEXT NOT NULL REFERENCES profile_fields(id), value_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(participant_id, field_id));
     """)
     db.commit()
@@ -168,6 +168,9 @@ def init_db(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE templates ADD COLUMN model_key TEXT")
     if "is_canonical" not in template_columns:
         db.execute("ALTER TABLE templates ADD COLUMN is_canonical INTEGER NOT NULL DEFAULT 0")
+    profile_field_columns = {r["name"] for r in db.execute("PRAGMA table_info(profile_fields)")}
+    if profile_field_columns and "is_dimension" not in profile_field_columns:
+        db.execute("ALTER TABLE profile_fields ADD COLUMN is_dimension INTEGER NOT NULL DEFAULT 0")
     ppv_columns = {r["name"] for r in db.execute("PRAGMA table_info(participant_profile_values)")}
     if ppv_columns and "session_id" not in ppv_columns:
         # Table already existed (created before session_id was added to its schema);

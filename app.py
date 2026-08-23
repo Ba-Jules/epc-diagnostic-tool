@@ -83,11 +83,11 @@ from epc.qualitatif import (
     create_training_topic, update_training_topic, delete_training_topic,
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
 )
-from epc.scoring import grade, analysis, analysis_for
+from epc.scoring import grade, analysis, analysis_for, dimension_analysis, MIN_COHORT_N
 from epc.profile import (
     create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
     create_profile_field, update_profile_field, delete_profile_field,
-    set_participant_profile_values, get_participant_profile_values,
+    set_participant_profile_values, get_participant_profile_values, available_dimensions,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -999,8 +999,19 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json(200, rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
             if path.startswith("/api/sessions/") and path.endswith("/participants"):
                 return self.json(200, list_session_participants(db, path.split("/")[3]))
+            if path.startswith("/api/sessions/") and path.endswith("/dimensions"):
+                return self.json(200, available_dimensions(db, path.split("/")[3]))
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
-                result = analysis(db, path.split("/")[3]); return self.json(200, result or {"error": "Session introuvable"})
+                sid = path.split("/")[3]
+                dimension, value = query.get("dimension", [None])[0], query.get("value", [None])[0]
+                if dimension is not None:
+                    try:
+                        result = dimension_analysis(db, sid, dimension, value)
+                    except ValueError as e:
+                        return self.json(400, {"error": str(e)})
+                else:
+                    result = analysis(db, sid)
+                return self.json(200, result or {"error": "Session introuvable"})
             if path.startswith("/api/sessions/") and path.endswith("/workshop-data"):
                 sid=path.split("/")[3]; return self.json(200,{"priorities":rows(db,"SELECT * FROM priorities WHERE session_id=?",(sid,)),"notes":rows(db,"SELECT * FROM analysis_notes WHERE session_id=?",(sid,)),"recommendations":rows(db,"SELECT * FROM recommendations WHERE session_id=?",(sid,))})
             if path.startswith("/api/sessions/") and path.endswith("/qualitative-data"):

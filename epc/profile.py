@@ -63,7 +63,7 @@ def profile_schema_payload(db: sqlite3.Connection, schema_id: str):
     out = dict(schema)
     out["fields"] = rows(db, "SELECT * FROM profile_fields WHERE schema_id=? ORDER BY display_order", (schema_id,))
     for f in out["fields"]:
-        f["required"] = bool(f["required"]); f["active"] = bool(f["active"]); f["options"] = json.loads(f.pop("options_json"))
+        f["required"] = bool(f["required"]); f["active"] = bool(f["active"]); f["is_dimension"] = bool(f["is_dimension"]); f["options"] = json.loads(f.pop("options_json"))
     return out
 
 
@@ -77,13 +77,16 @@ def create_profile_field(db: sqlite3.Connection, schema_id: str, data: dict) -> 
     options = data.get("options") or []
     if field_type in CHOICE_FIELD_TYPES and not options:
         raise ValueError("Les options sont obligatoires pour un champ à choix.")
+    is_dimension = bool(data.get("isDimension"))
+    if is_dimension and field_type not in CHOICE_FIELD_TYPES:
+        raise ValueError("Seuls les champs à choix unique ou multiple peuvent devenir une dimension d'analyse.")
     fid = str(uuid.uuid4())
     # slugify() intentionally preserves case (export_filename() wants that for
     # readability) - a field_key is a machine identifier though, so lowercase it
     # explicitly here rather than changing slugify()'s shared behaviour.
     key = data.get("key") or slugify(label).lower()
-    db.execute("INSERT INTO profile_fields (id,schema_id,field_key,field_type,label,required,options_json,display_order,active) VALUES (?,?,?,?,?,?,?,?,?)",
-        (fid, schema_id, key, field_type, label, int(bool(data.get("required"))), json.dumps(options), int(data.get("displayOrder") or next_order(db, "profile_fields", "schema_id", schema_id)), int(data.get("active", True))))
+    db.execute("INSERT INTO profile_fields (id,schema_id,field_key,field_type,label,required,options_json,display_order,active,is_dimension) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (fid, schema_id, key, field_type, label, int(bool(data.get("required"))), json.dumps(options), int(data.get("displayOrder") or next_order(db, "profile_fields", "schema_id", schema_id)), int(data.get("active", True)), int(is_dimension)))
     db.commit()
     return fid
 
@@ -98,9 +101,12 @@ def update_profile_field(db: sqlite3.Connection, field_id: str, data: dict) -> N
     options = data.get("options", json.loads(existing["options_json"]))
     if field_type in CHOICE_FIELD_TYPES and not options:
         raise ValueError("Les options sont obligatoires pour un champ à choix.")
+    is_dimension = bool(data.get("isDimension", existing["is_dimension"]))
+    if is_dimension and field_type not in CHOICE_FIELD_TYPES:
+        raise ValueError("Seuls les champs à choix unique ou multiple peuvent devenir une dimension d'analyse.")
     label = (data.get("label", existing["label"]) or "").strip() or existing["label"]
-    db.execute("UPDATE profile_fields SET field_key=?,field_type=?,label=?,required=?,options_json=?,display_order=?,active=? WHERE id=?",
-        (data.get("key", existing["field_key"]), field_type, label, int(bool(data.get("required", existing["required"]))), json.dumps(options), int(data.get("displayOrder", existing["display_order"])), int(data.get("active", existing["active"])), field_id))
+    db.execute("UPDATE profile_fields SET field_key=?,field_type=?,label=?,required=?,options_json=?,display_order=?,active=?,is_dimension=? WHERE id=?",
+        (data.get("key", existing["field_key"]), field_type, label, int(bool(data.get("required", existing["required"]))), json.dumps(options), int(data.get("displayOrder", existing["display_order"])), int(data.get("active", existing["active"])), int(is_dimension), field_id))
     db.commit()
 
 
@@ -184,3 +190,52 @@ def get_participant_profile_values(db: sqlite3.Connection, participant_id: str) 
                             JOIN profile_fields f ON f.id=v.field_id WHERE v.participant_id=?""", (participant_id,)):
         result[r["field_key"]] = json.loads(r["value_json"])
     return result
+
+
+def available_dimensions(db: sqlite3.Connection, session_id: str) -> list[dict]:
+    """Categorical profile fields the pilot has explicitly flagged as an
+    analytical dimension for this session's attached profile (lot 5, cf.
+    AUDIT_MODULARISATION_8800.md) - empty list if the session has no profile
+    schema, or if none of its fields are flagged. Powers the filter/comparison
+    UI's "which dimension can I use" choices."""
+    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    schema_id = session["profile_schema_id"] if session else None
+    if not schema_id:
+        return []
+    payload = profile_schema_payload(db, schema_id)
+    return [{"fieldKey": f["field_key"], "label": f["label"], "fieldType": f["field_type"], "options": f["options"]}
+            for f in payload["fields"] if f["is_dimension"] and f["active"]]
+
+
+def resolve_dimension_field(db: sqlite3.Connection, session_id: str, field_key: str) -> dict:
+    """The sole gate that lets a query filter analysis by a categorical
+    field: refuses any field_key that isn't an active, pilot-flagged
+    dimension of the session's own attached profile. This is the privacy
+    boundary the audit calls out for lot 5 - never resolve a dimension
+    filter any other way (e.g. trusting a raw field_key from the client
+    without this check would let anyone probe arbitrary profile values)."""
+    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    schema_id = session["profile_schema_id"] if session else None
+    if not schema_id:
+        raise ValueError("Cet atelier n'a pas de profil participant configuré.")
+    field = db.execute("SELECT * FROM profile_fields WHERE schema_id=? AND field_key=? AND active=1", (schema_id, field_key)).fetchone()
+    if not field or not field["is_dimension"]:
+        raise ValueError("Ce champ n'est pas configuré comme dimension d'analyse.")
+    return dict(field)
+
+
+def participants_matching_dimension(db: sqlite3.Connection, session_id: str, field_key: str, value) -> set[str]:
+    """Participant ids of `session_id` whose profile value for `field_key`
+    equals (single_choice) or contains (multi_choice) `value`. Caller must
+    have already validated field_key via resolve_dimension_field."""
+    matching: set[str] = set()
+    for r in db.execute("""SELECT v.participant_id, v.value_json FROM participant_profile_values v
+                            JOIN profile_fields f ON f.id=v.field_id
+                            WHERE v.session_id=? AND f.field_key=?""", (session_id, field_key)):
+        stored = json.loads(r["value_json"])
+        if isinstance(stored, list):
+            if value in stored:
+                matching.add(r["participant_id"])
+        elif stored == value:
+            matching.add(r["participant_id"])
+    return matching

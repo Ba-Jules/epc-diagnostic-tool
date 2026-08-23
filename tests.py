@@ -1013,4 +1013,113 @@ class EngineTests(unittest.TestCase):
         roster=app.list_session_participants(self.db,sid)
         self.assertEqual([p['id'] for p in roster],[first,second])
 
+    # --- Lot 5 (modularisation, AUDIT_MODULARISATION_8800.md) : dimensions
+    # d'analyse - tout champ de profil categoriel explicitement marque par le
+    # pilote devient filtrable. epc/profile.py available_dimensions() /
+    # resolve_dimension_field() (seule porte d'entree du filtre - garde-fou
+    # vie privee) ; epc/scoring.py analysis_for(participant_ids=...) /
+    # dimension_analysis() (garde-fou petits N) ---
+
+    def test_create_profile_field_rejects_is_dimension_on_non_categorical_type(self):
+        schema_id,_=self._mk_schema_with_fields()
+        with self.assertRaises(ValueError):
+            app.create_profile_field(self.db,schema_id,{'fieldType':'text','label':'Notes','isDimension':True})
+
+    def test_update_profile_field_rejects_is_dimension_on_non_categorical_type(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        with self.assertRaises(ValueError):
+            app.update_profile_field(self.db,fields['age'],{'isDimension':True})
+
+    def test_available_dimensions_lists_only_flagged_categorical_fields(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        app.update_profile_field(self.db,fields['genre'],{'isDimension':True})
+        sid='sess-dims'; self._mk_session(sid,profile_schema_id=schema_id)
+        dims=app.available_dimensions(self.db,sid)
+        self.assertEqual([d['fieldKey'] for d in dims],['genre'])
+        self.assertEqual(dims[0]['options'],['F','M','Autre'])
+
+    def test_available_dimensions_empty_without_a_profile_schema(self):
+        sid='sess-dims-none'; self._mk_session(sid)
+        self.assertEqual(app.available_dimensions(self.db,sid),[])
+
+    def test_dimension_analysis_refuses_unflagged_field(self):
+        # The privacy gate: a categorical field the pilot never explicitly
+        # flagged must stay unfilterable, even though it exists on the schema.
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-dim-refuse'; self._mk_session(sid,profile_schema_id=schema_id)
+        with self.assertRaises(ValueError):
+            app.dimension_analysis(self.db,sid,'genre','F')
+
+    def test_dimension_analysis_refuses_when_session_has_no_profile(self):
+        sid='sess-dim-no-profile'; self._mk_session(sid)
+        with self.assertRaises(ValueError):
+            app.dimension_analysis(self.db,sid,'genre','F')
+
+    def _mk_dimension_session(self,sid,n_f=5,n_m=5,value_f=5,value_m=1):
+        schema_id,fields=self._mk_schema_with_fields()
+        app.update_profile_field(self.db,fields['genre'],{'isDimension':True})
+        tid=self._mk_session(sid,profile_schema_id=schema_id)
+        for i in range(n_f):
+            pid=f'{sid}-f{i}'; self._add_participant(sid,pid,tid,value=value_f,n=1)
+            app.set_participant_profile_values(self.db,pid,{'genre':'F'})
+        for i in range(n_m):
+            pid=f'{sid}-m{i}'; self._add_participant(sid,pid,tid,value=value_m,n=1)
+            app.set_participant_profile_values(self.db,pid,{'genre':'M'})
+        self.db.commit()
+        return schema_id
+
+    def test_dimension_analysis_restricts_capacity_to_matching_participants(self):
+        # 5 "F" answer 5/5 (capacity 100), 5 "M" answer 1/5 (capacity 20): the
+        # whole-session mean (3/5 => 60) must NOT leak into either filtered
+        # cohort - each is recomputed strictly from its own responses.
+        sid='sess-dim-single'; self._mk_dimension_session(sid)
+        whole=app.analysis(self.db,sid)
+        self.assertEqual(whole['completedCount'],10)
+        self.assertEqual(whole['domains'][0]['capacity'],60)
+        filtered=app.dimension_analysis(self.db,sid,'genre','F')
+        self.assertEqual(filtered['completedCount'],5)
+        self.assertEqual(filtered['domains'][0]['capacity'],100)
+        self.assertEqual(filtered['dimension'],{'fieldKey':'genre','fieldLabel':'Genre','value':'F','minRequired':app.MIN_COHORT_N,'suppressed':False})
+        other=app.dimension_analysis(self.db,sid,'genre','M')
+        self.assertEqual(other['domains'][0]['capacity'],20)
+
+    def test_dimension_analysis_multi_choice_matches_array_membership(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        app.update_profile_field(self.db,fields['langues'],{'isDimension':True})
+        sid='sess-dim-multi'; tid=self._mk_session(sid,profile_schema_id=schema_id)
+        for i in range(5):
+            pid=f'{sid}-fr{i}'; self._add_participant(sid,pid,tid,value=5,n=1)
+            app.set_participant_profile_values(self.db,pid,{'langues':['fr','wo']})
+        for i in range(5):
+            pid=f'{sid}-en{i}'; self._add_participant(sid,pid,tid,value=1,n=1)
+            app.set_participant_profile_values(self.db,pid,{'langues':['en']})
+        self.db.commit()
+        result=app.dimension_analysis(self.db,sid,'langues','fr')
+        self.assertEqual(result['completedCount'],5)
+        self.assertEqual(result['domains'][0]['capacity'],100)
+
+    def test_dimension_analysis_suppresses_results_below_min_cohort_n(self):
+        sid='sess-dim-small'; self._mk_dimension_session(sid,n_f=2,n_m=8)
+        result=app.dimension_analysis(self.db,sid,'genre','F')
+        self.assertEqual(result['completedCount'],2)
+        self.assertTrue(result['dimension']['suppressed'])
+        self.assertIsNone(result['domains'][0]['capacity'])
+        self.assertIsNone(result['domains'][0]['consensus'])
+        self.assertIsNone(result['global']['capacity'])
+        self.assertEqual(result['domains'][0]['indicators'][0]['distribution'],{})
+        # Counts stay visible even when the numbers are suppressed - needed by
+        # the UI to explain *why* it's hiding the results.
+        self.assertEqual(result['participantCount'],2)
+
+    def test_dimension_analysis_no_matching_participant_returns_empty_cohort_without_crashing(self):
+        sid='sess-dim-empty'; self._mk_dimension_session(sid,n_f=0,n_m=5)
+        result=app.dimension_analysis(self.db,sid,'genre','F')
+        self.assertEqual(result['completedCount'],0)
+        self.assertEqual(result['participantCount'],0)
+        self.assertTrue(result['dimension']['suppressed'])
+
+    def test_analysis_for_participant_ids_none_is_unchanged_from_pre_lot5_behaviour(self):
+        sid='sess-dim-regression'; self._mk_dimension_session(sid)
+        self.assertEqual(app.analysis_for(self.db,[sid]),app.analysis_for(self.db,[sid],participant_ids=None))
+
 if __name__=='__main__': unittest.main()

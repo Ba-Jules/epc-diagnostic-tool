@@ -17,6 +17,15 @@ from __future__ import annotations
 import json
 
 from .db import rows, template_payload
+from .profile import participants_matching_dimension, resolve_dimension_field
+
+# Cohorts smaller than this have every capacity/consensus number suppressed
+# in dimension_analysis() (lot 5, cf. AUDIT_MODULARISATION_8800.md - flagged
+# "risque critique pour confidentialite et biais petits N"). A tiny matching
+# subgroup is often re-identifiable by the pilot reading the report, so the
+# safe default is to hide the numbers outright, not merely flag them as
+# low-confidence.
+MIN_COHORT_N = 5
 
 
 def grade(value, norm):
@@ -49,7 +58,7 @@ def analysis(db, session_id: str):
     return result
 
 
-def analysis_for(db, session_ids: list[str]):
+def analysis_for(db, session_ids: list[str], participant_ids: set[str] | None = None):
     """Same EPC calculation as analysis(), pooling responses/participants over
     one or several session ids. A single id behaves exactly as before; several
     ids (same template) is what powers campaign consolidation — the maths are
@@ -60,6 +69,14 @@ def analysis_for(db, session_ids: list[str]):
     published score) — participantCount below still counts every participant
     row (started or completed) so "commencés" stays visible separately from
     "validés"/completedCount.
+
+    participant_ids (lot 5, optional) further restricts every query below to
+    that id set — this is the one and only place a dimension filter actually
+    touches the calculation: it recomputes from the same individual response
+    rows, never from a pre-aggregated table, so a filtered cohort's numbers
+    are exactly what analysis_for() would compute if only that cohort had
+    ever answered. None (the default) means "no restriction", identical to
+    the pre-lot-5 behaviour.
     """
     if not session_ids:
         return None
@@ -71,13 +88,17 @@ def analysis_for(db, session_ids: list[str]):
     low, high, amplitude = float(scale["min"]), float(scale["max"]), float(scale["max"] - scale["min"])
     output_max = float(rules.get("outputRange", [0, 100])[1])
     ph = ",".join("?" * len(session_ids))
+    pid_clause, pid_params = "", ()
+    if participant_ids is not None:
+        pid_clause = f" AND p.id IN ({','.join('?' * len(participant_ids))})" if participant_ids else " AND 0"
+        pid_params = tuple(participant_ids)
     all_values, output_domains, all_participant_ids = [], [], set()
-    total_participants = len(rows(db, f"SELECT id FROM participants WHERE session_id IN ({ph})", session_ids))
+    total_participants = len(rows(db, f"SELECT id FROM participants p WHERE p.session_id IN ({ph}){pid_clause}", (*session_ids, *pid_params)))
     for domain in template["domains"]:
         indicators = [i for i in domain["indicators"] if i["active"]]
         output_indicators, participant_means = [], {}
         for indicator in indicators:
-            response_rows = rows(db, f"SELECT r.participant_id,r.value_json FROM responses r JOIN participants p ON p.id=r.participant_id WHERE r.session_id IN ({ph}) AND r.indicator_id=? AND p.status='completed'", (*session_ids, indicator["id"]))
+            response_rows = rows(db, f"SELECT r.participant_id,r.value_json FROM responses r JOIN participants p ON p.id=r.participant_id WHERE r.session_id IN ({ph}) AND r.indicator_id=? AND p.status='completed'{pid_clause}", (*session_ids, indicator["id"], *pid_params))
             values = [float(json.loads(r["value_json"])) for r in response_rows if isinstance(json.loads(r["value_json"]), (int, float))]
             for r in response_rows:
                 value = json.loads(r["value_json"])
@@ -107,5 +128,45 @@ def analysis_for(db, session_ids: list[str]):
     graded_caps=[d["gradedCapacity"] for d in output_domains if d["gradedCapacity"] is not None]; graded_cons=[d["gradedConsensus"] for d in output_domains if d["gradedConsensus"] is not None]
     global_graded_capacity=sum(graded_caps)/len(graded_caps) if graded_caps else None
     global_graded_consensus=sum(graded_cons)/len(graded_cons) if graded_cons else None
-    completed=len(rows(db,f"SELECT id FROM participants WHERE session_id IN ({ph}) AND status='completed'",session_ids))
+    completed=len(rows(db,f"SELECT id FROM participants p WHERE p.session_id IN ({ph}) AND p.status='completed'{pid_clause}",(*session_ids,*pid_params)))
     return {"sessionIds": session_ids, "participantCount": total_participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "consensusNote": "single_respondent" if len(all_participant_ids) == 1 else None, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
+
+
+def _suppress_small_cohort(result: dict) -> None:
+    """Nulls every capacity/consensus number in an analysis_for() result in
+    place, keeping only counts and labels. Used by dimension_analysis() when
+    a filtered cohort falls below MIN_COHORT_N."""
+    for domain in result["domains"]:
+        for indicator in domain["indicators"]:
+            for key in ("mean", "capacity", "dispersion", "consensus"):
+                indicator[key] = None
+            indicator["distribution"] = {}
+        for key in ("capacity", "dispersion", "consensus", "gradedCapacity", "gradedConsensus"):
+            domain[key] = None
+    for key in ("capacity", "consensus", "gradedCapacity", "gradedConsensus"):
+        result["global"][key] = None
+
+
+def dimension_analysis(db, session_id: str, field_key: str, value, min_n: int = MIN_COHORT_N):
+    """Same EPC calculation as analysis(), restricted to the participants of
+    `session_id` whose profile value for `field_key` matches `value` (lot 5:
+    "tout champ categoriel autorise devient dimension analytique"). Raises
+    ValueError (via resolve_dimension_field) if field_key isn't an active,
+    pilot-flagged dimension of this session's attached profile — that check
+    is the sole privacy gate, see its own docstring.
+
+    Cohorts smaller than min_n come back with every capacity/consensus number
+    suppressed (participant/completed counts stay visible, since those are
+    already shown at the whole-session level and needed to explain why the
+    numbers are hidden) — see MIN_COHORT_N.
+    """
+    field = resolve_dimension_field(db, session_id, field_key)
+    matching_ids = participants_matching_dimension(db, session_id, field_key, value)
+    result = analysis_for(db, [session_id], participant_ids=matching_ids)
+    if result is None:
+        return None
+    suppressed = result["completedCount"] < min_n
+    if suppressed:
+        _suppress_small_cohort(result)
+    result["dimension"] = {"fieldKey": field_key, "fieldLabel": field["label"], "value": value, "minRequired": min_n, "suppressed": suppressed}
+    return result
