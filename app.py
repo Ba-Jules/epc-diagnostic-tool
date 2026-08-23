@@ -52,6 +52,7 @@ from epc.db import (
     ensure_reference_questionnaire_version, migrate_v2_ownership, seed_epc, template_payload,
     MODEL_KEY_EPC_SENEVAL, ensure_model_identity,
 )
+from epc.restitution import restitution_manifest, session_restitution_manifest, resolve_model_key
 from epc.auth import (
     AuthRequiredError, PermissionDeniedError, PUBLIC_API_EXACT, is_public_api,
     PBKDF2_ITERATIONS, AUTH_TOKEN_TTL_DAYS, hash_password, verify_password,
@@ -230,12 +231,6 @@ def _c(obj):
     return "non calculable (1 seul répondant)" if obj.get("consensusNote") == "single_respondent" else _n(obj.get("consensus"))
 
 
-AI_SYSTEM_BASE = ("Tu assistes un modérateur d'atelier de diagnostic organisationnel EPC/SENEVAL. "
-    "Tu interprètes des données déjà calculées ; tu ne recalcules jamais un score, tu n'inventes jamais un fait, "
-    "une cause, une conséquence ou une recommandation absente des données fournies. "
-    "Style professionnel, clair, factuel, sans jargon d'IA, sans formules comme « l'IA constate que ». Réponds en français.")
-
-
 def ai_epc_context(db, sid):
     a = analysis(db, sid)
     g = a["global"]
@@ -293,24 +288,6 @@ def _parse_json_list(text):
         raise AIError("Réponse du fournisseur IA illisible (format inattendu).") from None
 
 
-AI_SECTION_LABELS = {
-    "resume_executif": "Résumé exécutif", "lecture_diagnostic": "Lecture du diagnostic",
-    "synthese_domaines": "Synthèse par domaine", "synthese_priorites": "Synthèse des priorités",
-    "synthese_recommandations": "Synthèse des recommandations", "synthese_formations": "Synthèse des besoins de formation",
-    "synthese_plan": "Synthèse du plan d'action", "conclusion": "Conclusion générale proposée",
-}
-AI_REPORT_SECTIONS = {
-    "resume_executif": "Rédige un RÉSUMÉ EXÉCUTIF de l'atelier : situation générale, principaux constats, points forts, points de vigilance, priorités retenues, principales orientations.",
-    "lecture_diagnostic": "Rédige une LECTURE DU DIAGNOSTIC : tendances, écarts, convergences, divergences, domaines remarquables, à partir de la capacité et du consensus.",
-    "synthese_domaines": "Rédige une SYNTHÈSE PAR DOMAINE : pour chaque domaine, résultat et interprétation prudente, en lien avec les analyses validées si disponibles.",
-    "synthese_priorites": "Rédige une SYNTHÈSE DES PRIORITÉS : priorités retenues, constats, causes validées, leviers retenus.",
-    "synthese_recommandations": "Rédige une SYNTHÈSE DES RECOMMANDATIONS retenues, regroupées en catégories cohérentes si pertinent.",
-    "synthese_formations": "Rédige une SYNTHÈSE DES BESOINS DE FORMATION retenus.",
-    "synthese_plan": "Rédige une SYNTHÈSE DU PLAN D'ACTION à partir des recommandations retenues.",
-    "conclusion": "Propose une CONCLUSION GÉNÉRALE concise et institutionnelle. Précise qu'il s'agit d'une proposition, pas d'une décision validée.",
-}
-
-
 def ai_report_context(db, sid):
     r = report_data(db, sid)
     q, m = r["qualitative"], r["meta"]
@@ -334,16 +311,17 @@ def report_rows(db, sid):
     a=analysis(db,sid); return a, [[d['label'],d['capacity'],_c(d),d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
 
 def report_xlsx(db,sid):
-    a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})
+    a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); manifest=restitution_manifest(template); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})
     analyses={x['priority_id']:x for x in q['analyses']}; priority_rows=[[p['id'],p['domain_label'],p['indicator_code'],p['indicator_label'],analyses.get(p['id'],{}).get('problem','')] for p in q['priorities']]
-    sheets=[("Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
-    for name,head,data in sheets:
+    sheets=[("synthese","Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("domaines","Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("indicateurs","Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("priorites","Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("analyses","Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("causes","Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("consequences","Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("leviers","Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("recommandations","Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("formations","Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("plan_action","Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("questionnaire","Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
+    for key,name,head,data in sheets:
+        if key not in manifest["reportSections"]: continue
         s=wb.add_worksheet(name);s.write_row(0,0,head,h);[s.write_row(n+1,0,row) for n,row in enumerate(data)];s.set_column(0,len(head)-1,24)
     ai_blocks=rows(db,"SELECT section_key,content FROM report_ai_blocks WHERE session_id=?",(sid,))
     if ai_blocks:
         wrap=wb.add_format({"text_wrap":True,"valign":"top"})
         ai_sheet=wb.add_worksheet("Synthèse_IA"); ai_sheet.write_row(0,0,["Section","Contenu proposé par l'assistant IA, retenu par le modérateur"],h)
-        for n,b in enumerate(ai_blocks): ai_sheet.write_row(n+1,0,[AI_SECTION_LABELS.get(b['section_key'],b['section_key']),b['content']],wrap)
+        for n,b in enumerate(ai_blocks): ai_sheet.write_row(n+1,0,[manifest["aiSectionLabels"].get(b['section_key'],b['section_key']),b['content']],wrap)
         ai_sheet.set_column(0,0,28); ai_sheet.set_column(1,1,110)
     domains=[d for d in a['domains'] if d.get('capacity') is not None]
     if PILImage is not None and domains:
@@ -791,6 +769,7 @@ def report_docx(db, sid):
     if not a:
         raise ValueError("Session introuvable")
     session, g = a["session"], a["global"]
+    manifest = restitution_manifest(template_payload(db, session["template_id"]))
     domains = [d for d in a["domains"] if d.get("capacity") is not None]
     priorities = qualitative_data(db, sid)["priorities"]
     doc = Document()
@@ -858,10 +837,10 @@ def report_docx(db, sid):
         docx_style_heading(doc.add_heading("Synthèse assistée par IA", level=2))
         docx_note(doc, "Propositions rédigées avec l'aide de l'assistant IA et explicitement retenues par le modérateur. "
             "Les données, scores et graphiques EPC ci-dessus restent la source primaire du diagnostic.", italic=False)
-        for key in AI_SECTION_LABELS:
+        for key in manifest["aiSectionLabels"]:
             block = next((b for b in ai_blocks if b["section_key"] == key), None)
             if not block: continue
-            docx_style_heading(doc.add_heading(AI_SECTION_LABELS[key], level=3))
+            docx_style_heading(doc.add_heading(manifest["aiSectionLabels"][key], level=3))
             doc.add_paragraph(block["content"])
 
     out = BytesIO(); doc.save(out); return out.getvalue()
@@ -910,7 +889,8 @@ def report_data(db, session_id: str):
     a=analysis(db,session_id)
     if not a: return None
     meta=db.execute("SELECT * FROM session_report_meta WHERE session_id=?",(session_id,)).fetchone()
-    return {"analysis":a,"template":template_payload(db,a["session"]["template_id"]),"qualitative":qualitative_data(db,session_id),"meta":dict(meta) if meta else {"facilitator":"","audience":"","context":"","conclusion":""}}
+    template=template_payload(db,a["session"]["template_id"])
+    return {"analysis":a,"template":template,"qualitative":qualitative_data(db,session_id),"meta":dict(meta) if meta else {"facilitator":"","audience":"","context":"","conclusion":""},"manifest":restitution_manifest(template)}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -1144,7 +1124,7 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     cfg = require_ai(db)
                     context = ai_epc_context(db, sid)
-                    system = AI_SYSTEM_BASE + (" Analyse conjointement capacité et consensus pour les domaines remarquables "
+                    system = session_restitution_manifest(db, sid)["aiSystemPrompt"] + (" Analyse conjointement capacité et consensus pour les domaines remarquables "
                         "(faible capacité + consensus élevé = constat partagé par le groupe ; faible capacité + consensus faible = perceptions divergentes ; "
                         "capacité élevée + consensus élevé = force reconnue ; capacité élevée + consensus faible = expérience hétérogène). "
                         "Structure ta réponse avec exactement ces titres, en majuscules : POINTS SAILLANTS / POINTS DE VIGILANCE / "
@@ -1159,7 +1139,7 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     cfg = require_ai(db)
                     _, _, _, context = ai_priority_context(db, sid, pid)
-                    system = AI_SYSTEM_BASE + (" Pour cette priorité, propose uniquement : 1) un constat reformulé à partir des seules données fournies, "
+                    system = session_restitution_manifest(db, sid)["aiSystemPrompt"] + (" Pour cette priorité, propose uniquement : 1) un constat reformulé à partir des seules données fournies, "
                         "2) des questions à poser au groupe, 3) les points nécessitant clarification. Ne propose ni cause ni recommandation ici.")
                     text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
                     sug_id = log_ai_suggestion(db, sid, "priority_prepare", pid, cfg["provider"], cfg["model"])
@@ -1174,7 +1154,7 @@ class Handler(SimpleHTTPRequestHandler):
                     cfg = require_ai(db)
                     _, _, _, context = ai_priority_context(db, sid, pid)
                     kind_fr = {"cause": "des hypothèses de CAUSES", "consequence": "des CONSÉQUENCES possibles", "lever": "des LEVIERS d'action possibles"}[kind]
-                    system = AI_SYSTEM_BASE + (f" Propose 3 à 5 {kind_fr} pour cette priorité, formulées comme des hypothèses à discuter — "
+                    system = session_restitution_manifest(db, sid)["aiSystemPrompt"] + (f" Propose 3 à 5 {kind_fr} pour cette priorité, formulées comme des hypothèses à discuter — "
                         "jamais présentées comme établies (n'écris jamais « cause identifiée »). "
                         "Réponds uniquement par une liste, une hypothèse par ligne, sans numérotation ni tiret, sans autre texte.")
                     text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
@@ -1201,7 +1181,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if not chain_lines:
                         return self.json(200, {"id": None, "items": [], "note": "Aucune cause ni levier validé par le groupe pour l'instant : rien à proposer."})
                     context = "\n\n".join(chain_lines)
-                    system = AI_SYSTEM_BASE + (" Pour chaque priorité listée, propose une ou deux recommandations d'action fondées UNIQUEMENT "
+                    system = session_restitution_manifest(db, sid)["aiSystemPrompt"] + (" Pour chaque priorité listée, propose une ou deux recommandations d'action fondées UNIQUEMENT "
                         "sur les causes/leviers validés fournis — ne produis pas de liste générique de bonnes pratiques sans lien avec ces données. "
                         "Réponds en JSON strict, uniquement une liste d'objets avec ces clés : priorityId, title, description, category, "
                         "priorityLevel (Haute, Moyenne ou Basse), owner, horizon. Aucun texte hors JSON.")
@@ -1220,7 +1200,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if not recs:
                         return self.json(200, {"id": None, "items": [], "note": "Aucune recommandation disponible : rien à proposer."})
                     context = "\n".join(f"- {r['title']} : {r['description']} (catégorie {r['category']})" for r in recs)
-                    system = AI_SYSTEM_BASE + (" À partir de ces recommandations, identifie les besoins de formation qu'elles font apparaître. "
+                    system = session_restitution_manifest(db, sid)["aiSystemPrompt"] + (" À partir de ces recommandations, identifie les besoins de formation qu'elles font apparaître. "
                         "Réponds en JSON strict, uniquement une liste d'objets avec ces clés : title, targetAudience, needText, "
                         "priorityLevel (Haute, Moyenne ou Basse). Aucun texte hors JSON.")
                     text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
@@ -1239,7 +1219,7 @@ class Handler(SimpleHTTPRequestHandler):
                         return self.json(200, {"id": None, "items": [], "note": "Aucune recommandation retenue pour l'instant : rien à structurer."})
                     context = "\n".join(f"- {r['title']} : {r['description']} (responsable : {r['owner'] or 'non renseigné'}, "
                         f"échéance : {r['horizon'] or 'non renseignée'})" for r in retained)
-                    system = AI_SYSTEM_BASE + (" Structure ces recommandations retenues en plan d'action. N'invente aucun engagement organisationnel : "
+                    system = session_restitution_manifest(db, sid)["aiSystemPrompt"] + (" Structure ces recommandations retenues en plan d'action. N'invente aucun engagement organisationnel : "
                         "si un responsable ou une échéance ne sont pas fournis dans les données, indique-le explicitement plutôt que d'en inventer un. "
                         "Réponds en JSON strict, uniquement une liste d'objets avec ces clés : action, owner, horizon, expectedResult, "
                         "indicator, dependencies. Aucun texte hors JSON.")
@@ -1252,11 +1232,12 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/sessions/") and path.endswith("/ai/report/section"):
                 sid = path.split("/")[3]
                 section = data.get("section")
-                if section not in AI_REPORT_SECTIONS: return self.json(400, {"error": "Section de rapport invalide."})
+                manifest = session_restitution_manifest(db, sid)
+                if section not in manifest["aiReportSections"]: return self.json(400, {"error": "Section de rapport invalide."})
                 try:
                     cfg = require_ai(db)
                     context = ai_report_context(db, sid)
-                    system = AI_SYSTEM_BASE + " " + AI_REPORT_SECTIONS[section] + (" N'invente aucune étape non réalisée : si les données "
+                    system = manifest["aiSystemPrompt"] + " " + manifest["aiReportSections"][section] + (" N'invente aucune étape non réalisée : si les données "
                         "nécessaires sont absentes, indique-le sobrement plutôt que d'inventer un contenu.")
                     text = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
                     sug_id = log_ai_suggestion(db, sid, f"report_{section}", None, cfg["provider"], cfg["model"])
@@ -1268,9 +1249,10 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     cfg = require_ai(db)
                     context = ai_report_context(db, sid)
+                    manifest = session_restitution_manifest(db, sid)
                     results = {}
-                    for section, instruction in AI_REPORT_SECTIONS.items():
-                        system = AI_SYSTEM_BASE + " " + instruction + (" N'invente aucune étape non réalisée : si les données "
+                    for section, instruction in manifest["aiReportSections"].items():
+                        system = manifest["aiSystemPrompt"] + " " + instruction + (" N'invente aucune étape non réalisée : si les données "
                             "nécessaires sont absentes, indique-le sobrement plutôt que d'inventer un contenu.")
                         results[section] = generate_ai_response(cfg["provider"], cfg["model"], system, context, cfg["api_key"])
                     sug_id = log_ai_suggestion(db, sid, "report_full", None, cfg["provider"], cfg["model"])
@@ -1351,7 +1333,7 @@ class Handler(SimpleHTTPRequestHandler):
                 db.commit(); return self.json(200, {"ok": True})
             if path.startswith("/api/sessions/") and path.endswith("/ai/report-block"):
                 sid = path.split("/")[3]; section = data.get("sectionKey"); content = data.get("content", "")
-                if section not in AI_REPORT_SECTIONS: return self.json(400, {"error": "Section de rapport invalide."})
+                if section not in session_restitution_manifest(db, sid)["aiReportSections"]: return self.json(400, {"error": "Section de rapport invalide."})
                 db.execute("INSERT INTO report_ai_blocks (id,session_id,section_key,content,retained_at) VALUES (?,?,?,?,?) "
                     "ON CONFLICT(session_id,section_key) DO UPDATE SET content=excluded.content,retained_at=excluded.retained_at",
                     (str(uuid.uuid4()), sid, section, content, now())); db.commit(); return self.json(200, {"ok": True})

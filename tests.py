@@ -1122,4 +1122,43 @@ class EngineTests(unittest.TestCase):
         sid='sess-dim-regression'; self._mk_dimension_session(sid)
         self.assertEqual(app.analysis_for(self.db,[sid]),app.analysis_for(self.db,[sid],participant_ids=None))
 
+    # --- Lot 6 (modularisation, AUDIT_MODULARISATION_8800.md) : manifeste de
+    # restitution - un seul modele (epc_seneval) existe aujourd'hui, son
+    # manifeste doit lister exactement ce qui est deja rendu (aucun
+    # changement de comportement), tout en etant le point que les generateurs
+    # XLSX/DOCX et les routes IA consultent reellement - epc/restitution.py ---
+
+    def test_resolve_model_key_defaults_untagged_template_to_epc_seneval(self):
+        # A custom/blank questionnaire (model_key NULL, cf. lot 2) still runs
+        # on the single EPC scoring engine that exists today - it must get
+        # the same restitution manifest as the canonical model, not a crash
+        # or an empty one.
+        self.assertEqual(app.resolve_model_key({'model_key':None}),'epc_seneval')
+        self.assertEqual(app.resolve_model_key({'model_key':'epc_seneval'}),'epc_seneval')
+
+    def test_restitution_manifest_lists_every_current_report_section_for_epc_seneval(self):
+        manifest=app.restitution_manifest({'model_key':'epc_seneval'})
+        self.assertEqual(manifest['modelKey'],'epc_seneval')
+        self.assertEqual(manifest['reportSections'],['synthese','domaines','indicateurs','priorites','analyses','causes','consequences','leviers','recommandations','formations','plan_action','questionnaire'])
+        self.assertEqual(len(manifest['aiReportSections']),8)
+        self.assertEqual(set(manifest['aiReportSections']),set(manifest['aiSectionLabels']))
+        self.assertIn('EPC/SENEVAL',manifest['aiSystemPrompt'])
+
+    def test_restitution_manifest_falls_back_to_epc_seneval_for_an_unknown_model_key(self):
+        # Defensive default (no second model exists yet to actually hit this
+        # branch) - documented in restitution_manifest()'s own docstring.
+        self.assertEqual(app.restitution_manifest({'model_key':'some_future_model'}),app.restitution_manifest({'model_key':'epc_seneval'}))
+
+    def test_report_data_includes_the_session_restitution_manifest(self):
+        sid='sess-restitution-manifest'; self._mk_session(sid)
+        pid='p'; self._add_participant(sid,pid,self.db.execute('select id from templates').fetchone()['id'],value=4,n=1)
+        self.db.commit()
+        data=app.report_data(self.db,sid)
+        self.assertEqual(data['manifest']['modelKey'],'epc_seneval')
+        self.assertIn('domaines',data['manifest']['reportSections'])
+
+    def test_session_restitution_manifest_matches_restitution_manifest_for_the_sessions_template(self):
+        sid='sess-restitution-manifest-2'; self._mk_session(sid)
+        self.assertEqual(app.session_restitution_manifest(self.db,sid),app.restitution_manifest({'model_key':'epc_seneval'}))
+
 if __name__=='__main__': unittest.main()
