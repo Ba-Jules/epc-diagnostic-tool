@@ -215,12 +215,15 @@ def migrate_legacy_qualitative_data(db: sqlite3.Connection, session_id: str | No
         migrated_entries += 1
 
     for r in recommendations:
-        if db.execute("SELECT 1 FROM workshop_recommendations WHERE session_id=? AND title=? AND description=?", (r["session_id"], r["title"], r["description"])).fetchone():
-            continue
-        priority_id = _ensure_priority_for_indicator(db, r["session_id"], r["indicator_id"]) if r["indicator_id"] else None
         description = r["description"] or ""
         if r["lever"]:
             description = (description + f"\n\nLevier (V1) : {r['lever']}").strip()
+        # Compare against the folded description (what actually gets stored),
+        # not the raw V1 text, or the dedup check below would never match on a
+        # second run and every re-run would duplicate the recommendation.
+        if db.execute("SELECT 1 FROM workshop_recommendations WHERE session_id=? AND title=? AND description=?", (r["session_id"], r["title"], description)).fetchone():
+            continue
+        priority_id = _ensure_priority_for_indicator(db, r["session_id"], r["indicator_id"]) if r["indicator_id"] else None
         stamp = now()
         db.execute("INSERT INTO workshop_recommendations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), r["session_id"], priority_id, None, None, r["title"], description,

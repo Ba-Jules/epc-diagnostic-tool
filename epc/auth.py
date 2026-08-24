@@ -108,6 +108,10 @@ def enforce_ownership(path: str, db: sqlite3.Connection, user) -> None:
         row = db.execute("SELECT owner_user_id FROM profile_schemas WHERE id=?", (parts[3],)).fetchone()
         if row and row["owner_user_id"] is not None and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
             raise PermissionDeniedError()
+    elif path.startswith("/api/profile-fields/") and len(parts) > 3 and parts[3]:
+        row = db.execute("SELECT s.owner_user_id AS owner_user_id FROM profile_fields f JOIN profile_schemas s ON s.id=f.schema_id WHERE f.id=?", (parts[3],)).fetchone()
+        if row and row["owner_user_id"] is not None and user["role"] != "admin" and row["owner_user_id"] != user["id"]:
+            raise PermissionDeniedError()
 
 
 def resolve_auth(path: str, method: str, db: sqlite3.Connection, cookie_header: str | None):

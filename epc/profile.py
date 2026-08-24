@@ -85,8 +85,12 @@ def create_profile_field(db: sqlite3.Connection, schema_id: str, data: dict) -> 
     # readability) - a field_key is a machine identifier though, so lowercase it
     # explicitly here rather than changing slugify()'s shared behaviour.
     key = data.get("key") or slugify(label).lower()
+    # `or` would treat an explicit displayOrder of 0 as falsy and silently
+    # replace it with the auto-computed order - check for None instead.
+    display_order = data.get("displayOrder")
+    display_order = int(display_order) if display_order is not None else next_order(db, "profile_fields", "schema_id", schema_id)
     db.execute("INSERT INTO profile_fields (id,schema_id,field_key,field_type,label,required,options_json,display_order,active,is_dimension) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (fid, schema_id, key, field_type, label, int(bool(data.get("required"))), json.dumps(options), int(data.get("displayOrder") or next_order(db, "profile_fields", "schema_id", schema_id)), int(data.get("active", True)), int(is_dimension)))
+        (fid, schema_id, key, field_type, label, int(bool(data.get("required"))), json.dumps(options), display_order, int(data.get("active", True)), int(is_dimension)))
     db.commit()
     return fid
 
@@ -133,7 +137,11 @@ def validate_profile_value(field: dict, raw_value):
         return None
     field_type = field["field_type"]
     options = json.loads(field["options_json"]) if field["options_json"] else []
-    allowed = {o["value"] if isinstance(o, dict) else o for o in options}
+    # Compared as strings (not raw equality) so an option value stored/edited
+    # as a non-string (e.g. numeric) still matches a submitted value of a
+    # different-but-equal-looking type - avoids rejecting a valid choice as
+    # invalid purely because of a JSON type mismatch.
+    allowed = {str(o["value"] if isinstance(o, dict) else o) for o in options}
     if field_type == "text":
         if not isinstance(raw_value, str):
             raise ValueError(f"Le champ « {label} » doit être du texte.")
@@ -143,11 +151,11 @@ def validate_profile_value(field: dict, raw_value):
             raise ValueError(f"Le champ « {label} » doit être un nombre.")
         return raw_value
     if field_type == "single_choice":
-        if raw_value not in allowed:
+        if str(raw_value) not in allowed:
             raise ValueError(f"Valeur invalide pour « {label} ».")
         return raw_value
     if field_type == "multi_choice":
-        if not isinstance(raw_value, list) or any(v not in allowed for v in raw_value):
+        if not isinstance(raw_value, list) or any(str(v) not in allowed for v in raw_value):
             raise ValueError(f"Valeur invalide pour « {label} ».")
         return raw_value
     raise ValueError(f"Type de champ inconnu : {field_type}")

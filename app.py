@@ -416,6 +416,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.serve_static(path)
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
+        except ValueError as e: return self.json(404, {"error": str(e)})
         finally: db.close()
 
     def do_POST(self):

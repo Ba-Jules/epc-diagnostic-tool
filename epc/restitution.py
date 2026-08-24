@@ -117,7 +117,10 @@ def _c(obj):
 
 
 def report_rows(db, sid):
-    a=analysis(db,sid); return a, [[d['label'],d['capacity'],_c(d),d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
+    a=analysis(db,sid)
+    if not a:
+        raise ValueError("Session introuvable")
+    return a, [[d['label'],d['capacity'],_c(d),d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
 
 def report_xlsx(db,sid):
     a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); manifest=restitution_manifest(template); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})

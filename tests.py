@@ -76,6 +76,16 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(data['priorities']),1); self.assertEqual(len(data['entries']),1); self.assertEqual(data['recommendations'][0]['status'],'Retenue')
         self.assertGreater(len(app.report_xlsx(self.db,sid)),1000)
 
+    def test_report_xlsx_and_docx_raise_clean_error_for_an_unknown_session(self):
+        # Regression for an ultrareview finding: report_rows()/report_xlsx() had
+        # no guard for analysis() returning None, so an invalid/deleted session
+        # id crashed with a raw TypeError instead of a catchable error like
+        # report_docx() already raised for the same case.
+        with self.assertRaises(ValueError):
+            app.report_xlsx(self.db,'no-such-session')
+        with self.assertRaises(ValueError):
+            app.report_docx(self.db,'no-such-session')
+
     # --- Régression : isolement des groupes homonymes entre campagnes (recette 2026-08-17) ---
 
     def test_homonym_groups_across_campaigns_stay_isolated(self):
@@ -341,6 +351,20 @@ class EngineTests(unittest.TestCase):
                 app.Handler.check_ownership(None,path,self.db,userB)
             app.Handler.check_ownership(None,path,self.db,userA)
             app.Handler.check_ownership(None,path,self.db,admin)
+
+    def test_cross_pilot_profile_field_access_denied(self):
+        # Regression for an ultrareview finding: enforce_ownership() had branches
+        # for /api/profile-schemas/ but none for /api/profile-fields/, so a PUT/
+        # DELETE on another pilot's field silently skipped the ownership check.
+        uidA=self._mk_user('own-field-a'); uidB=self._mk_user('own-field-b')
+        schema_id,fields=self._mk_schema_with_fields(owner=uidA)
+        self.db.commit()
+        userA={'id':uidA,'role':'pilote'}; userB={'id':uidB,'role':'pilote'}; admin={'id':'adm-field','role':'admin'}
+        field_path='/api/profile-fields/'+fields['organisation']
+        with self.assertRaises(app.PermissionDeniedError):
+            app.enforce_ownership(field_path,self.db,userB)
+        app.enforce_ownership(field_path,self.db,userA)
+        app.enforce_ownership(field_path,self.db,admin)
 
     def test_group_delete_force(self):
         uid=self._mk_user('u5')
@@ -846,6 +870,28 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.create_profile_schema(self.db,'owner-x',{'name':''})
 
+    def test_set_participant_profile_values_matches_choice_options_across_json_types(self):
+        # Regression for an ultrareview finding: choice validation compared
+        # raw equality, so an option stored as a number (possible via direct
+        # API use, not the textarea UI which only ever sends strings)
+        # rejected an equal-looking submitted string as invalid.
+        schema_id=app.create_profile_schema(self.db,'owner-types',{'name':'Profil types'})
+        app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Niveau','options':[1,2,3]})
+        sid='sess-choice-types'; self._mk_session(sid,profile_schema_id=schema_id)
+        pid=app.create_participant(self.db,sid,{})['id']
+        app.set_participant_profile_values(self.db,pid,{'niveau':'2'})
+        self.assertEqual(app.get_participant_profile_values(self.db,pid),{'niveau':'2'})
+        with self.assertRaises(ValueError):
+            app.set_participant_profile_values(self.db,pid,{'niveau':'9'})
+
+    def test_create_profile_field_respects_an_explicit_display_order_of_zero(self):
+        # Regression for an ultrareview finding: `data.get("displayOrder") or
+        # next_order(...)` treated an explicit 0 as falsy and silently replaced
+        # it with the auto-computed order.
+        schema_id=app.create_profile_schema(self.db,'owner-order',{'name':'Profil ordre'})
+        fid=app.create_profile_field(self.db,schema_id,{'fieldType':'text','label':'Premier','displayOrder':0})
+        self.assertEqual(self.db.execute('select display_order from profile_fields where id=?',(fid,)).fetchone()['display_order'],0)
+
     def test_profile_field_types_require_options_for_choice_fields(self):
         schema_id=app.create_profile_schema(self.db,'owner-x',{'name':'Profil'}); self.db.commit()
         with self.assertRaises(ValueError):
@@ -1179,7 +1225,7 @@ class EngineTests(unittest.TestCase):
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']
         indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         app.create_analysis_note(self.db,sid,{'indicatorId':indicator,'kind':'Cause','content':'Constat unique','validationStatus':'FAIT_VALIDE'})
-        app.create_legacy_recommendation(self.db,sid,{'indicatorId':indicator,'title':'Reco unique','description':'Desc unique','kind':'organisation'})
+        app.create_legacy_recommendation(self.db,sid,{'indicatorId':indicator,'title':'Reco unique','description':'Desc unique','kind':'organisation','lever':'Levier test'})
         first=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
         second=app.migrate_legacy_qualitative_data(self.db,session_id=sid)
         self.assertEqual(first['migratedEntries'],1); self.assertEqual(first['migratedRecommendations'],1)

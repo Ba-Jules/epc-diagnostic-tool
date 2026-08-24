@@ -81,7 +81,7 @@ async function dimensionAnalysisView(sessionId){
     return;
   }
   window.dimensionFields=dims;
-  app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${sessionId}')">← Retour à l’atelier</button><h2>Filtrer / comparer par profil</h2><p class="muted small">Compare les résultats du diagnostic entre sous-groupes de participants, selon un champ de profil marqué comme dimension. Les sous-groupes trop petits (moins de ${dims[0]?.minRequired||5} participants validés) sont automatiquement masqués pour préserver l’anonymat.</p>
+  app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${sessionId}')">← Retour à l’atelier</button><h2>Filtrer / comparer par profil</h2><p class="muted small">Compare les résultats du diagnostic entre sous-groupes de participants, selon un champ de profil marqué comme dimension. Les sous-groupes dont l’effectif est trop faible sont automatiquement masqués pour préserver l’anonymat (le seuil exact est rappelé après chaque comparaison).</p>
   <label>Dimension<select id="dim-select" onchange="renderDimensionOptions('${sessionId}')">${dims.map(d=>`<option value="${esc(d.fieldKey)}">${esc(d.label)}</option>`).join('')}</select></label>
   <div id="dim-options"></div>
   <div id="dim-result"></div>
