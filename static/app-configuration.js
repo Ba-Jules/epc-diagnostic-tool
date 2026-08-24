@@ -102,11 +102,16 @@ async function saveProfileSchemaName(e,sessionId,schemaId){
   profileEditor(sessionId,schemaId);
 }
 async function participantsList(id){
-  let [list,participants]=await Promise.all([api('/api/sessions'),api('/api/sessions/'+id+'/participants')]);
-  let s=list.find(x=>x.id===id);
+  let s=(await api('/api/sessions')).find(x=>x.id===id);
   if(!s)return notice('Atelier introuvable.');
   window.currentSessionId=id;
-  let profile=s.profile_schema_id?await api('/api/profile-schemas/'+s.profile_schema_id).catch(()=>null):null;
+  // profile_schema_id is already known from s (the sessions list), so this
+  // fetch doesn't need to wait on the unrelated participants fetch - both
+  // run concurrently instead of profile being serialized after it.
+  let [participants,profile]=await Promise.all([
+    api('/api/sessions/'+id+'/participants'),
+    s.profile_schema_id?api('/api/profile-schemas/'+s.profile_schema_id).catch(()=>null):Promise.resolve(null),
+  ]);
   let profileFields=profile?profile.fields.filter(f=>f.active):[];
   shell('participants','collecte',s.name,'Participants de l’atelier');
   app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${id}')">← Retour à l’atelier</button><h2>Participants — ${esc(s.name)}</h2>

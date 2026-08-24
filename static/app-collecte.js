@@ -100,7 +100,10 @@ async function runDimensionFilter(sessionId){
   if(!values.length)return notice('Sélectionnez au moins une valeur à comparer.');
   let results;
   try{
-    results=await Promise.all(values.map(v=>api('/api/sessions/'+sessionId+'/analysis?dimension='+encodeURIComponent(key)+'&value='+encodeURIComponent(v))));
+    // One request compares every selected value (backend batches the
+    // participant-matching query instead of re-running it once per value).
+    let qs='dimension='+encodeURIComponent(key)+values.map(v=>'&value='+encodeURIComponent(v)).join('');
+    results=(await api('/api/sessions/'+sessionId+'/analysis?'+qs)).results;
   }catch(err){return notice(err.message)}
   window.dimensionResults={key,values,results};
   let domainLabels=results[0].domains.map(d=>d.label);

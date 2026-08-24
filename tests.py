@@ -1129,6 +1129,18 @@ class EngineTests(unittest.TestCase):
         other=app.dimension_analysis(self.db,sid,'genre','M')
         self.assertEqual(other['domains'][0]['capacity'],20)
 
+    def test_dimension_analysis_multi_returns_one_result_per_value_in_order(self):
+        # Regression for an ultrareview efficiency finding: comparing several
+        # values used to re-run the identical unfiltered participant-matching
+        # query once per value; dimension_analysis_multi() batches it into a
+        # single query and must still produce the exact same per-value numbers
+        # as calling dimension_analysis() once per value.
+        sid='sess-dim-multi-batch'; self._mk_dimension_session(sid)
+        results=app.dimension_analysis_multi(self.db,sid,'genre',['F','M'])
+        self.assertEqual([r['dimension']['value'] for r in results],['F','M'])
+        self.assertEqual(results[0]['completedCount'],5); self.assertEqual(results[0]['domains'][0]['capacity'],100)
+        self.assertEqual(results[1]['completedCount'],5); self.assertEqual(results[1]['domains'][0]['capacity'],20)
+
     def test_dimension_analysis_multi_choice_matches_array_membership(self):
         schema_id,fields=self._mk_schema_with_fields()
         app.update_profile_field(self.db,fields['langues'],{'isDimension':True})

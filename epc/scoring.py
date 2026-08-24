@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from .db import rows, template_payload
-from .profile import participants_matching_dimension, resolve_dimension_field
+from .profile import participants_matching_dimension_values, resolve_dimension_field
 
 # Cohorts smaller than this have every capacity/consensus number suppressed
 # in dimension_analysis() (lot 5, cf. AUDIT_MODULARISATION_8800.md - flagged
@@ -147,13 +147,19 @@ def _suppress_small_cohort(result: dict) -> None:
         result["global"][key] = None
 
 
-def dimension_analysis(db, session_id: str, field_key: str, value, min_n: int = MIN_COHORT_N):
+def dimension_analysis_multi(db, session_id: str, field_key: str, values: list, min_n: int = MIN_COHORT_N):
     """Same EPC calculation as analysis(), restricted to the participants of
-    `session_id` whose profile value for `field_key` matches `value` (lot 5:
-    "tout champ categoriel autorise devient dimension analytique"). Raises
+    `session_id` whose profile value for `field_key` matches each of
+    `values` (lot 5: "tout champ categoriel autorise devient dimension
+    analytique") — one result per value, in the same order. Raises
     ValueError (via resolve_dimension_field) if field_key isn't an active,
     pilot-flagged dimension of this session's attached profile — that check
     is the sole privacy gate, see its own docstring.
+
+    The privacy gate and the participant-matching query both run once
+    regardless of how many values are compared (comparing several values of
+    one dimension is the comparison screen's normal use, not once-per-value
+    HTTP calls each re-scanning the same rows).
 
     Cohorts smaller than min_n come back with every capacity/consensus number
     suppressed (participant/completed counts stay visible, since those are
@@ -161,12 +167,21 @@ def dimension_analysis(db, session_id: str, field_key: str, value, min_n: int = 
     numbers are hidden) — see MIN_COHORT_N.
     """
     field = resolve_dimension_field(db, session_id, field_key)
-    matching_ids = participants_matching_dimension(db, session_id, field_key, value)
-    result = analysis_for(db, [session_id], participant_ids=matching_ids)
-    if result is None:
-        return None
-    suppressed = result["completedCount"] < min_n
-    if suppressed:
-        _suppress_small_cohort(result)
-    result["dimension"] = {"fieldKey": field_key, "fieldLabel": field["label"], "value": value, "minRequired": min_n, "suppressed": suppressed}
-    return result
+    matches = participants_matching_dimension_values(db, session_id, field_key, values)
+    results = []
+    for value in values:
+        result = analysis_for(db, [session_id], participant_ids=matches[value])
+        if result is None:
+            continue
+        suppressed = result["completedCount"] < min_n
+        if suppressed:
+            _suppress_small_cohort(result)
+        result["dimension"] = {"fieldKey": field_key, "fieldLabel": field["label"], "value": value, "minRequired": min_n, "suppressed": suppressed}
+        results.append(result)
+    return results
+
+
+def dimension_analysis(db, session_id: str, field_key: str, value, min_n: int = MIN_COHORT_N):
+    """Single-value convenience wrapper over dimension_analysis_multi()."""
+    results = dimension_analysis_multi(db, session_id, field_key, [value], min_n=min_n)
+    return results[0] if results else None

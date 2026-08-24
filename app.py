@@ -70,7 +70,7 @@ from epc.qualitatif import (
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
     migrate_legacy_qualitative_data,
 )
-from epc.scoring import grade, analysis, analysis_for, dimension_analysis, MIN_COHORT_N
+from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, MIN_COHORT_N
 from epc.profile import (
     create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
     create_profile_field, update_profile_field, delete_profile_field,
@@ -375,14 +375,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json(200, available_dimensions(db, path.split("/")[3]))
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
                 sid = path.split("/")[3]
-                dimension, value = query.get("dimension", [None])[0], query.get("value", [None])[0]
+                dimension, values = query.get("dimension", [None])[0], query.get("value", [])
                 if dimension is not None:
+                    # One or more ?value= params compare that many cohorts of the
+                    # same dimension in a single call (see dimension_analysis_multi's
+                    # docstring) - always returns {"results": [...]}, even for a
+                    # single value, so callers don't need two response shapes.
                     try:
-                        result = dimension_analysis(db, sid, dimension, value)
+                        return self.json(200, {"results": dimension_analysis_multi(db, sid, dimension, values)})
                     except ValueError as e:
                         return self.json(400, {"error": str(e)})
-                else:
-                    result = analysis(db, sid)
+                result = analysis(db, sid)
                 return self.json(200, result or {"error": "Session introuvable"})
             if path.startswith("/api/sessions/") and path.endswith("/workshop-data"):
                 sid=path.split("/")[3]; return self.json(200,{"priorities":rows(db,"SELECT * FROM priorities WHERE session_id=?",(sid,)),"notes":rows(db,"SELECT * FROM analysis_notes WHERE session_id=?",(sid,)),"recommendations":rows(db,"SELECT * FROM recommendations WHERE session_id=?",(sid,))})

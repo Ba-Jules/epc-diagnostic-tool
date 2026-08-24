@@ -232,18 +232,29 @@ def resolve_dimension_field(db: sqlite3.Connection, session_id: str, field_key: 
     return dict(field)
 
 
-def participants_matching_dimension(db: sqlite3.Connection, session_id: str, field_key: str, value) -> set[str]:
-    """Participant ids of `session_id` whose profile value for `field_key`
-    equals (single_choice) or contains (multi_choice) `value`. Caller must
-    have already validated field_key via resolve_dimension_field."""
-    matching: set[str] = set()
+def participants_matching_dimension_values(db: sqlite3.Connection, session_id: str, field_key: str, values: list) -> dict:
+    """Same matching as participants_matching_dimension(), for several values
+    of the same field at once from a single query over its rows - avoids
+    re-scanning the identical session_id+field_key rows once per compared
+    value (the comparison screen compares several values of one dimension
+    in a single request). Caller must have already validated field_key via
+    resolve_dimension_field."""
+    result: dict = {value: set() for value in values}
     for r in db.execute("""SELECT v.participant_id, v.value_json FROM participant_profile_values v
                             JOIN profile_fields f ON f.id=v.field_id
                             WHERE v.session_id=? AND f.field_key=?""", (session_id, field_key)):
         stored = json.loads(r["value_json"])
-        if isinstance(stored, list):
-            if value in stored:
-                matching.add(r["participant_id"])
-        elif stored == value:
-            matching.add(r["participant_id"])
-    return matching
+        for value in values:
+            if isinstance(stored, list):
+                if value in stored:
+                    result[value].add(r["participant_id"])
+            elif stored == value:
+                result[value].add(r["participant_id"])
+    return result
+
+
+def participants_matching_dimension(db: sqlite3.Connection, session_id: str, field_key: str, value) -> set[str]:
+    """Participant ids of `session_id` whose profile value for `field_key`
+    equals (single_choice) or contains (multi_choice) `value`. Caller must
+    have already validated field_key via resolve_dimension_field."""
+    return participants_matching_dimension_values(db, session_id, field_key, [value])[value]

@@ -65,10 +65,22 @@ def participant_resume(db: sqlite3.Connection, session_id: str, participant_id: 
 
 def list_session_participants(db: sqlite3.Connection, session_id: str) -> list[dict]:
     """Pilot-facing roster (lot 4c): every participant of a session with their
-    profile values merged in, if the session has a profile schema attached."""
+    profile values merged in, if the session has a profile schema attached.
+
+    Profile values are fetched in a single session-scoped query and grouped
+    in Python rather than one get_participant_profile_values() call per
+    participant (an N+1 query pattern flagged by the ultrareview) - the
+    roster page's query count no longer grows with the number of
+    participants."""
     session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
     schema_id = session["profile_schema_id"] if session else None
     participants = rows(db, "SELECT * FROM participants WHERE session_id=? ORDER BY started_at", (session_id,))
+    values_by_participant: dict[str, dict] = {}
+    if schema_id:
+        for r in db.execute(
+            """SELECT v.participant_id, f.field_key, v.value_json FROM participant_profile_values v
+               JOIN profile_fields f ON f.id=v.field_id WHERE v.session_id=?""", (session_id,)):
+            values_by_participant.setdefault(r["participant_id"], {})[r["field_key"]] = json.loads(r["value_json"])
     for p in participants:
-        p["profileValues"] = get_participant_profile_values(db, p["id"]) if schema_id else {}
+        p["profileValues"] = values_by_participant.get(p["id"], {})
     return participants
