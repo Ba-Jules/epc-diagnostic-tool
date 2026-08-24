@@ -106,12 +106,10 @@ async function runDimensionFilter(sessionId){
     results=(await api('/api/sessions/'+sessionId+'/analysis?'+qs)).results;
   }catch(err){return notice(err.message)}
   window.dimensionResults={key,values,results};
-  let domainLabels=results[0].domains.map(d=>d.label);
-  let rowsHtml=domainLabels.map((label,di)=>`<tr><td>${esc(label)}</td>${results.map(r=>`<td>${fmt(r.domains[di]?.capacity)}</td><td>${fmtConsensus(r.domains[di])}</td>`).join('')}</tr>`).join('');
   let suppressedValues=results.filter(r=>r.dimension.suppressed).map(r=>r.dimension.value);
-  document.querySelector('#dim-result').innerHTML=`<div class="table-wrap" style="margin-top:1rem"><table><tr><th>Domaine</th>${results.map(r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`).join('')}</tr>${rowsHtml}</table></div>
-  ${suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Effectif insuffisant (moins de ${results[0].dimension.minRequired} participants validés) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}. Résultats masqués pour préserver l’anonymat.</p>`:''}
-  <button class="secondary" style="margin-top:.6rem" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button>`;
+  document.querySelector('#dim-result').innerHTML=comparisonTableHtml(results,r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`)
+    +(suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Effectif insuffisant (moins de ${results[0].dimension.minRequired} participants validés) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}. Résultats masqués pour préserver l’anonymat.</p>`:'')
+    +`<button class="secondary" style="margin-top:.6rem" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button>`;
 }
 function exportDimensionCsv(){
   let {values,results}=window.dimensionResults;

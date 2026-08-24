@@ -22,6 +22,25 @@ FIELD_TYPES = ("text", "number", "single_choice", "multi_choice")
 CHOICE_FIELD_TYPES = ("single_choice", "multi_choice")
 
 
+def _validate_choice_and_dimension(field_type: str, options: list, is_dimension: bool) -> None:
+    """Shared by create_profile_field()/update_profile_field(): options are
+    required for choice-type fields, and only choice-type fields may become
+    a dimension - kept in one place so the two functions can't silently
+    drift on which combinations are accepted."""
+    if field_type in CHOICE_FIELD_TYPES and not options:
+        raise ValueError("Les options sont obligatoires pour un champ à choix.")
+    if is_dimension and field_type not in CHOICE_FIELD_TYPES:
+        raise ValueError("Seuls les champs à choix unique ou multiple peuvent devenir une dimension d'analyse.")
+
+
+def _session_profile_schema_id(db: sqlite3.Connection, session_id: str) -> str | None:
+    """Shared by set_participant_profile_values()/available_dimensions()/
+    resolve_dimension_field(): the session's attached profile schema id, or
+    None if the session doesn't exist or has no profile attached."""
+    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    return session["profile_schema_id"] if session else None
+
+
 def create_profile_schema(db: sqlite3.Connection, owner_user_id: str | None, data: dict) -> str:
     name = (data.get("name") or "").strip()
     if not name:
@@ -75,11 +94,8 @@ def create_profile_field(db: sqlite3.Connection, schema_id: str, data: dict) -> 
     if not label:
         raise ValueError("Le libellé du champ est obligatoire.")
     options = data.get("options") or []
-    if field_type in CHOICE_FIELD_TYPES and not options:
-        raise ValueError("Les options sont obligatoires pour un champ à choix.")
     is_dimension = bool(data.get("isDimension"))
-    if is_dimension and field_type not in CHOICE_FIELD_TYPES:
-        raise ValueError("Seuls les champs à choix unique ou multiple peuvent devenir une dimension d'analyse.")
+    _validate_choice_and_dimension(field_type, options, is_dimension)
     fid = str(uuid.uuid4())
     # slugify() intentionally preserves case (export_filename() wants that for
     # readability) - a field_key is a machine identifier though, so lowercase it
@@ -103,11 +119,8 @@ def update_profile_field(db: sqlite3.Connection, field_id: str, data: dict) -> N
     if field_type not in FIELD_TYPES:
         raise ValueError(f"Type de champ invalide : {field_type}")
     options = data.get("options", json.loads(existing["options_json"]))
-    if field_type in CHOICE_FIELD_TYPES and not options:
-        raise ValueError("Les options sont obligatoires pour un champ à choix.")
     is_dimension = bool(data.get("isDimension", existing["is_dimension"]))
-    if is_dimension and field_type not in CHOICE_FIELD_TYPES:
-        raise ValueError("Seuls les champs à choix unique ou multiple peuvent devenir une dimension d'analyse.")
+    _validate_choice_and_dimension(field_type, options, is_dimension)
     label = (data.get("label", existing["label"]) or "").strip() or existing["label"]
     db.execute("UPDATE profile_fields SET field_key=?,field_type=?,label=?,required=?,options_json=?,display_order=?,active=?,is_dimension=? WHERE id=?",
         (data.get("key", existing["field_key"]), field_type, label, int(bool(data.get("required", existing["required"]))), json.dumps(options), int(data.get("displayOrder", existing["display_order"])), int(data.get("active", existing["active"])), int(is_dimension), field_id))
@@ -169,8 +182,7 @@ def set_participant_profile_values(db: sqlite3.Connection, participant_id: str, 
     if not participant:
         raise ValueError("Participant introuvable.")
     session_id = participant["session_id"]
-    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-    schema_id = session["profile_schema_id"] if session else None
+    schema_id = _session_profile_schema_id(db, session_id)
     if not schema_id:
         raise ValueError("Cet atelier n'a pas de profil participant configuré.")
     fields = {f["field_key"]: f for f in rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1", (schema_id,))}
@@ -206,8 +218,7 @@ def available_dimensions(db: sqlite3.Connection, session_id: str) -> list[dict]:
     AUDIT_MODULARISATION_8800.md) - empty list if the session has no profile
     schema, or if none of its fields are flagged. Powers the filter/comparison
     UI's "which dimension can I use" choices."""
-    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-    schema_id = session["profile_schema_id"] if session else None
+    schema_id = _session_profile_schema_id(db, session_id)
     if not schema_id:
         return []
     payload = profile_schema_payload(db, schema_id)
@@ -222,8 +233,7 @@ def resolve_dimension_field(db: sqlite3.Connection, session_id: str, field_key: 
     boundary the audit calls out for lot 5 - never resolve a dimension
     filter any other way (e.g. trusting a raw field_key from the client
     without this check would let anyone probe arbitrary profile values)."""
-    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-    schema_id = session["profile_schema_id"] if session else None
+    schema_id = _session_profile_schema_id(db, session_id)
     if not schema_id:
         raise ValueError("Cet atelier n'a pas de profil participant configuré.")
     field = db.execute("SELECT * FROM profile_fields WHERE schema_id=? AND field_key=? AND active=1", (schema_id, field_key)).fetchone()
