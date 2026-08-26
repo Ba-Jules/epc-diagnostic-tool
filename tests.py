@@ -1335,6 +1335,26 @@ class EngineTests(unittest.TestCase):
         result=app.filtered_analysis(self.db,sid,{'genre':['F'],'langues':['fr']})
         self.assertIn('findings',result)
 
+    def test_indicator_level_output_carries_graded_capacity_and_consensus(self):
+        # Mission de parite :8810->:8820 (consignes_claude.txt), "priorites
+        # enrichies" : stable-simple graduait deja capacite/consensus au
+        # niveau indicateur (pas seulement domaine) - domainDiagnostic() en
+        # depend pour sa colonne "Graduation".
+        sid='sess-indicator-grade'
+        t=self._mk_session(sid)
+        for i,v in enumerate([5]*5): self._add_participant(sid,f'p{i}',t,value=v,n=1)
+        self.db.commit()
+        indicator=app.analysis(self.db,sid)['domains'][0]['indicators'][0]
+        self.assertEqual(indicator['capacity'],100)
+        self.assertEqual(indicator['gradedCapacity'],100)
+        self.assertIsNotNone(indicator['gradedConsensus'])
+
+    def test_suppressed_cohort_nulls_indicator_graded_values_too(self):
+        sid='sess-suppress-grade'; self._mk_dimension_session(sid,n_f=2,n_m=8)
+        result=app.dimension_analysis(self.db,sid,'genre','F')
+        self.assertIsNone(result['domains'][0]['indicators'][0]['gradedCapacity'])
+        self.assertIsNone(result['domains'][0]['indicators'][0]['gradedConsensus'])
+
     def test_filtered_analysis_suppressed_cohort_has_no_findings(self):
         sid='sess-find-suppressed'; self._mk_dimension_session(sid,n_f=2,n_m=8)
         result=app.filtered_analysis(self.db,sid,{'genre':['F']})

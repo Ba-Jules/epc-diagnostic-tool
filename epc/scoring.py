@@ -118,7 +118,7 @@ def analysis_for(db, session_ids: list[str], participant_ids: set[str] | None = 
             sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** .5 if len(values) > 1 else None
             capacity = mean / high * output_max if mean is not None else None
             cons = max(0, output_max - consensus["factor"] * (sd / amplitude * output_max)) if sd is not None else None
-            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, total_participants - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
+            output_indicators.append({"id": indicator["id"], "code": indicator["code"], "label": indicator["label"], "responses": len(values), "missing": max(0, total_participants - len(values)), "mean": mean, "capacity": capacity, "dispersion": sd, "consensus": cons, "consensusNote": "single_respondent" if len(values) == 1 else None, "gradedCapacity": grade(capacity, norm) if capacity is not None else None, "gradedConsensus": grade(cons, norm) if cons is not None else None, "distribution": {str(k): values.count(k) for k in range(int(low), int(high) + 1)}})
             all_values.extend(values)
         person_scores = [sum(values) / len(values) for values in participant_means.values() if values]
         dmean = sum(person_scores) / len(person_scores) if person_scores else None
@@ -205,7 +205,7 @@ def _suppress_small_cohort(result: dict) -> None:
     a filtered cohort falls below MIN_COHORT_N."""
     for domain in result["domains"]:
         for indicator in domain["indicators"]:
-            for key in ("mean", "capacity", "dispersion", "consensus"):
+            for key in ("mean", "capacity", "dispersion", "consensus", "gradedCapacity", "gradedConsensus"):
                 indicator[key] = None
             indicator["distribution"] = {}
         for key in ("capacity", "dispersion", "consensus", "gradedCapacity", "gradedConsensus"):
