@@ -116,6 +116,7 @@ async function participantsList(id){
   shell('participants','collecte',s.name,'Participants de l’atelier');
   app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${id}')">← Retour à l’atelier</button><h2>Participants — ${esc(s.name)}</h2>
   <p class="muted small">${participants.length} participant${participants.length>1?'s':''} — ${participants.filter(p=>p.status==='completed').length} validé${participants.filter(p=>p.status==='completed').length>1?'s':''}.</p>
+  <div class="row" style="margin-bottom:.8rem"><a href="/api/sessions/${id}/individual-responses.xlsx"><button type="button" class="secondary">Exporter les réponses individuelles (Excel)</button></a><a href="/api/sessions/${id}/individual-responses.csv"><button type="button" class="secondary">Exporter les réponses individuelles (CSV)</button></a></div>
   <div class="table-wrap"><table><tr><th>Identifiant</th><th>Statut</th><th>Commencé</th><th>Terminé</th>${profileFields.map(f=>`<th>${esc(f.label)}</th>`).join('')}</tr>
   ${participants.length?participants.map(p=>`<tr><td>${esc(p.display_name||p.anonymous_id)}</td><td>${p.status==='completed'?'Validé':'En cours'}</td><td>${new Date(p.started_at).toLocaleString('fr-FR')}</td><td>${p.completed_at?new Date(p.completed_at).toLocaleString('fr-FR'):'—'}</td>${profileFields.map(f=>`<td>${esc(profileValueDisplay(p.profileValues[f.field_key],f))}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${4+profileFields.length}">Aucun participant pour le moment.</td></tr>`}
   </table></div></section>`;

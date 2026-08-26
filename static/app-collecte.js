@@ -85,6 +85,11 @@ async function dimensionAnalysisView(sessionId){
   <label>Dimension<select id="dim-select" onchange="renderDimensionOptions('${sessionId}')">${dims.map(d=>`<option value="${esc(d.fieldKey)}">${esc(d.label)}</option>`).join('')}</select></label>
   <div id="dim-options"></div>
   <div id="dim-result"></div>
+  <h3 style="margin-top:1.6rem">Filtrer sur plusieurs dimensions combinées</h3>
+  <p class="muted small">Sélectionnez une valeur pour chaque dimension à combiner (laissez « Tous » pour ignorer une dimension) — les critères se cumulent (ET).</p>
+  <div id="combined-filter-fields" class="row row-fields">${dims.map(d=>`<label>${esc(d.label)}<select data-filter-field="${esc(d.fieldKey)}"><option value="">Tous</option>${d.options.map(o=>{let v=profileOptValue(o);return `<option value="${esc(v)}">${esc(profileOptLabel(o))}</option>`}).join('')}</select></label>`).join('')}</div>
+  <button type="button" style="margin-top:.4rem" onclick="runCombinedFilter('${sessionId}')">Filtrer</button>
+  <div id="combined-filter-result" style="margin-top:1rem"></div>
   </section>`;
   renderDimensionOptions(sessionId);
 }
@@ -119,6 +124,44 @@ async function runDimensionFilter(sessionId){
     +comparisonTableHtml(results,r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`)
     +(suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Effectif insuffisant (moins de ${results[0].dimension.minRequired} participants validés) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}. Résultats masqués pour préserver l’anonymat.</p>`:'')
     +`<button class="secondary" style="margin-top:.6rem" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button>`;
+}
+// Filtres combinables entre PLUSIEURS dimensions differentes a la fois
+// (mission de parite :8810->:8820, cf. consignes_claude.txt) - distinct de
+// runDimensionFilter() ci-dessus, qui compare plusieurs VALEURS d'UNE seule
+// dimension. Aucun nom de dimension code en dur : lu depuis les selects
+// data-filter-field generes dynamiquement a partir de window.dimensionFields.
+function activeCombinedFilters(){
+  let filters={};
+  document.querySelectorAll('#combined-filter-fields select[data-filter-field]').forEach(el=>{if(el.value)filters[el.dataset.filterField]=[el.value]});
+  return filters;
+}
+function combinedFilterQueryString(filters){
+  return Object.entries(filters).map(([k,v])=>'filter='+encodeURIComponent(k+':'+v.join(','))).join('&');
+}
+async function runCombinedFilter(sessionId){
+  let filters=activeCombinedFilters(),qs=combinedFilterQueryString(filters);
+  let result;
+  try{result=await api('/api/sessions/'+sessionId+'/analysis'+(qs?'?'+qs:''))}catch(err){return notice(err.message)}
+  window.combinedFilterResult={sessionId,filters};
+  let filtLabel=result.filters.applied.length?result.filters.applied.map(f=>`${esc(f.fieldLabel)} = ${f.values.map(v=>esc(v)).join(', ')}`).join(' · '):'Tous les participants';
+  let box=document.querySelector('#combined-filter-result');
+  if(!result.completedCount){box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = 0</p><p class="muted">Pas de répondant correspondant à ces critères.</p>`;return}
+  box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = ${result.completedCount}</p>`
+    +(result.filters.suppressed?`<p class="muted small">⚠ Effectif insuffisant (moins de ${result.filters.minRequired} participants validés) pour préserver l’anonymat. Résultats masqués.</p>`
+      :`<div class="grid"><div class="metric"><span class="label">Capacité</span><b>${fmt(result.global.capacity)}</b></div><div class="metric"><span class="label">Consensus</span><b>${fmtConsensus(result.global)}</b></div><div class="metric"><span class="label">Capacité graduée</span><b>${fmt(result.global.gradedCapacity)}</b></div><div class="metric"><span class="label">Consensus gradué</span><b>${fmt(result.global.gradedConsensus)}</b></div></div>${bars(result.domains,'standard')}${bars(result.domains,'graded')}`)
+    +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="downloadFilteredAnalysis('xlsx')">Exporter l’analyse filtrée (Excel)</button><button class="secondary" onclick="downloadFilteredAnalysis('csv')">Exporter l’analyse filtrée (CSV)</button></div>`;
+}
+async function downloadFilteredAnalysis(ext){
+  let{sessionId,filters}=window.combinedFilterResult||{};
+  if(!sessionId)return;
+  let qs=combinedFilterQueryString(filters);
+  try{
+    let r=await fetch('/api/sessions/'+sessionId+'/filtered-analysis.'+ext+(qs?'?'+qs:''));
+    if(!r.ok){let x=await r.json().catch(()=>({}));throw Error(x.error||'Le fichier n’a pas pu être généré.')}
+    let blob=await r.blob(),cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename=([^;]+)/),filename=m?m[1].replace(/["']/g,''):`analyse-filtree.${ext}`;
+    let u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=filename;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),1000);
+  }catch(e){notice(e.message||'Téléchargement impossible. Veuillez réessayer.')}
 }
 function exportDimensionCsv(){
   let {values,results}=window.dimensionResults;

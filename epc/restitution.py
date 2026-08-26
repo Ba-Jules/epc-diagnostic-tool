@@ -14,13 +14,15 @@ savent toujours dessiner que ce que l'EPC dessine deja).
 """
 from __future__ import annotations
 
+import csv
+import json
 import math
 import re
-from io import BytesIO
+from io import BytesIO, StringIO
 
 from .db import MODEL_KEY_EPC_SENEVAL, rows, template_payload
-from .profile import participant_profile_breakdown
-from .scoring import analysis
+from .profile import get_participant_profile_values, participant_profile_breakdown
+from .scoring import analysis, filtered_analysis
 
 
 def findings_rows(findings: dict) -> list[list]:
@@ -139,6 +141,111 @@ def report_rows(db, sid):
     if not a:
         raise ValueError("Session introuvable")
     return a, [[d['label'],d['capacity'],_c(d),d['gradedCapacity'],d['gradedConsensus'],d['responses']] for d in a['domains']]
+
+# Export "reponses individuelles" (mission de parite :8810->:8820, cf.
+# consignes_claude.txt) : format large, une ligne par participant valide,
+# une colonne par champ de profil ACTIF de la session (jamais les 5 champs
+# fixes de :8810 - lus dynamiquement depuis profile_fields) + une colonne par
+# indicateur actif. Cloisonne a UNE session (donc a un groupe) : jamais de
+# donnee d'une autre session/campagne.
+def individual_responses_rows(db, session_id: str) -> dict:
+    session = db.execute("SELECT template_id, profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if not session:
+        return {"indicators": [], "profileFields": [], "rows": []}
+    template = template_payload(db, session["template_id"])
+    indicators = [i for d in template["domains"] for i in d["indicators"] if i["active"]]
+    profile_fields = rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1 ORDER BY display_order", (session["profile_schema_id"],)) if session["profile_schema_id"] else []
+    participants = rows(db, "SELECT * FROM participants WHERE session_id=? AND status='completed' ORDER BY started_at", (session_id,))
+    out_rows = []
+    for p in participants:
+        nominative = bool((p["display_name"] or "").strip())
+        responses = {r["indicator_id"]: json.loads(r["value_json"]) for r in db.execute("SELECT indicator_id,value_json FROM responses WHERE session_id=? AND participant_id=?", (session_id, p["id"]))}
+        profile_values = get_participant_profile_values(db, p["id"])
+        row = {"id": p["anonymous_id"], "name": p["display_name"] if nominative else "", "status": "Nominatif" if nominative else "Anonyme"}
+        for field in profile_fields:
+            value = profile_values.get(field["field_key"])
+            row[field["id"]] = ", ".join(str(v) for v in value) if isinstance(value, list) else ("" if value is None else value)
+        for ind in indicators:
+            row[ind["id"]] = responses.get(ind["id"], "")
+        out_rows.append(row)
+    return {"indicators": indicators, "profileFields": profile_fields, "rows": out_rows}
+
+
+INDIVIDUAL_RESPONSES_HEAD = ["Identifiant participant", "Nom", "Statut"]
+
+
+def _individual_responses_table(db, session_id: str):
+    data = individual_responses_rows(db, session_id)
+    head = INDIVIDUAL_RESPONSES_HEAD + [f["label"] for f in data["profileFields"]] + [i["code"] for i in data["indicators"]]
+    body = [[row["id"], row["name"], row["status"]] + [row[f["id"]] for f in data["profileFields"]] + [row[i["id"]] for i in data["indicators"]] for row in data["rows"]]
+    return head, body
+
+
+def individual_responses_xlsx(db, session_id: str):
+    head, body = _individual_responses_table(db, session_id)
+    out = BytesIO(); wb = xlsxwriter.Workbook(out, {"in_memory": True}); h = wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF"})
+    s = wb.add_worksheet("Réponses individuelles"); s.write_row(0, 0, head, h)
+    for n, row in enumerate(body): s.write_row(n + 1, 0, row)
+    s.set_column(0, len(head) - 1, 20)
+    wb.close(); return out.getvalue()
+
+
+def individual_responses_csv(db, session_id: str):
+    head, body = _individual_responses_table(db, session_id)
+    buf = StringIO(); writer = csv.writer(buf); writer.writerow(head)
+    for row in body: writer.writerow(row)
+    return buf.getvalue().encode()
+
+
+# Export "resultats filtres" (mission de parite :8810->:8820, cf.
+# consignes_claude.txt) : reutilise filtered_analysis() (epc/scoring.py) -
+# combine autant de dimensions que fournies (AND entre dimensions, OR entre
+# valeurs d'une meme dimension, jamais un nom de champ code en dur) -,
+# l'export correspond donc exactement aux resultats affiches par l'ecran de
+# filtrage, y compris la suppression des petits effectifs (MIN_COHORT_N).
+def filtered_analysis_rows(db, session_id: str, filters: dict):
+    a = filtered_analysis(db, session_id, filters)
+    if a is None:
+        return None
+    session_row = db.execute("SELECT name, campaign_id, group_code FROM sessions WHERE id=?", (session_id,)).fetchone()
+    filt_desc = "; ".join(f"{f['fieldLabel']}={','.join(str(v) for v in f['values'])}" for f in a["filters"]["applied"]) or "Tous les participants"
+    header = [
+        ["Mission", session_row["name"]],
+        ["Campagne", session_row["campaign_id"] or "—"],
+        ["Groupe", session_row["group_code"] or "—"],
+        ["Filtres actifs", filt_desc],
+        ["N (validés)", a["completedCount"]],
+    ]
+    domain_rows = [[d["label"], d["capacity"], _c(d), d["gradedCapacity"], d["gradedConsensus"], d["responses"]] for d in a["domains"]]
+    indicator_rows = [[d["label"], i["label"], i["capacity"], _c(i), i["responses"], i["missing"]] for d in a["domains"] for i in d["indicators"]]
+    return header, domain_rows, indicator_rows
+
+
+def filtered_analysis_xlsx(db, session_id: str, filters: dict):
+    result = filtered_analysis_rows(db, session_id, filters)
+    if result is None:
+        raise ValueError("Session introuvable")
+    header, domain_rows, indicator_rows = result
+    out = BytesIO(); wb = xlsxwriter.Workbook(out, {"in_memory": True}); h = wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF"})
+    s = wb.add_worksheet("Filtre"); [s.write_row(n, 0, row) for n, row in enumerate(header)]; s.set_column(0, 1, 30)
+    d = wb.add_worksheet("Domaines"); d.write_row(0, 0, ["Domaine", "Capacité", "Consensus", "Cap. graduée", "Cons. gradué", "Réponses"], h); [d.write_row(n + 1, 0, row) for n, row in enumerate(domain_rows)]; d.set_column(0, 5, 22)
+    i = wb.add_worksheet("Indicateurs"); i.write_row(0, 0, ["Domaine", "Référence", "Capacité", "Consensus", "Réponses", "Manquants"], h); [i.write_row(n + 1, 0, row) for n, row in enumerate(indicator_rows)]; i.set_column(0, 5, 24)
+    wb.close(); return out.getvalue()
+
+
+def filtered_analysis_csv(db, session_id: str, filters: dict):
+    result = filtered_analysis_rows(db, session_id, filters)
+    if result is None:
+        raise ValueError("Session introuvable")
+    header, domain_rows, indicator_rows = result
+    buf = StringIO(); writer = csv.writer(buf)
+    for row in header: writer.writerow(row)
+    writer.writerow([]); writer.writerow(["Domaine", "Capacité", "Consensus", "Cap. graduée", "Cons. gradué", "Réponses"])
+    for row in domain_rows: writer.writerow(row)
+    writer.writerow([]); writer.writerow(["Domaine", "Référence", "Capacité", "Consensus", "Réponses", "Manquants"])
+    for row in indicator_rows: writer.writerow(row)
+    return buf.getvalue().encode()
+
 
 def report_xlsx(db,sid):
     a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); manifest=restitution_manifest(template); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})

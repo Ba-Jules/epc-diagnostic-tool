@@ -1566,6 +1566,63 @@ class EngineTests(unittest.TestCase):
         sid='sess-report-profile-none'; self._mk_session(sid)
         self.assertEqual(app.report_data(self.db,sid)['profile'],[])
 
+    def test_individual_responses_rows_has_one_row_per_completed_participant_with_dynamic_profile(self):
+        sid='sess-individual-responses'
+        schema_id,fields=self._mk_schema_with_fields()
+        t=self._mk_session(sid,profile_schema_id=schema_id)
+        self._add_participant(sid,'p-done',t,value=5,n=2,status='completed')
+        app.set_participant_profile_values(self.db,'p-done',{'genre':'F','age':30})
+        self._add_participant(sid,'p-progress',t,value=3,n=1,status='in_progress')
+        self.db.commit()
+        data=app.individual_responses_rows(self.db,sid)
+        self.assertEqual(len(data['rows']),1)
+        row=data['rows'][0]
+        self.assertEqual(row['status'],'Anonyme')
+        self.assertEqual(row[fields['genre']],'F')
+        self.assertEqual(row[fields['age']],30)
+        self.assertEqual(len(data['profileFields']),4)
+
+    def test_individual_responses_rows_marks_nominative_when_display_name_set(self):
+        sid='sess-individual-nominative'; t=self._mk_session(sid)
+        self._add_participant(sid,'p-named',t,value=5,n=1)
+        self.db.execute("UPDATE participants SET display_name='Awa Diop' WHERE id='p-named'"); self.db.commit()
+        row=app.individual_responses_rows(self.db,sid)['rows'][0]
+        self.assertEqual(row['status'],'Nominatif')
+        self.assertEqual(row['name'],'Awa Diop')
+
+    def test_individual_responses_xlsx_and_csv_do_not_crash(self):
+        sid='sess-individual-export'; t=self._mk_session(sid)
+        self._add_participant(sid,'p1',t,value=5,n=1)
+        self.db.commit()
+        self.assertGreater(len(app.individual_responses_xlsx(self.db,sid)),500)
+        self.assertGreater(len(app.individual_responses_csv(self.db,sid)),20)
+
+    def test_filtered_analysis_export_matches_the_filtered_result_exactly(self):
+        sid='sess-filtered-export'; self._mk_combined_filter_session(sid)
+        header,domain_rows,indicator_rows=app.filtered_analysis_rows(self.db,sid,{'genre':['F'],'langues':['fr']})
+        self.assertIn(['N (validés)',5],header)
+        self.assertEqual(domain_rows[0][1],100)
+
+    def test_filtered_analysis_export_includes_campaign_and_group_when_present(self):
+        uid=self._mk_user('u-filtered-export')
+        t=self.db.execute("select id,version from templates where name='EPC / SENEVAL'").fetchone()
+        cid=app.create_campaign(self.db,uid,t['id'],t['version'],{'name':'Campagne export'})
+        camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        g=app.create_group(self.db,camp,uid,{'name':'Groupe export'})
+        header,_,_=app.filtered_analysis_rows(self.db,g['id'],{})
+        self.assertIn(['Campagne',cid],header)
+
+    def test_filtered_analysis_xlsx_and_csv_do_not_crash(self):
+        sid='sess-filtered-export-bytes'; self._mk_combined_filter_session(sid)
+        self.assertGreater(len(app.filtered_analysis_xlsx(self.db,sid,{'genre':['F']})),500)
+        self.assertGreater(len(app.filtered_analysis_csv(self.db,sid,{'genre':['F']})),20)
+
+    def test_filtered_analysis_export_raises_for_unknown_session(self):
+        with self.assertRaises(ValueError):
+            app.filtered_analysis_xlsx(self.db,'no-such-session',{})
+        with self.assertRaises(ValueError):
+            app.filtered_analysis_csv(self.db,'no-such-session',{})
+
     def test_report_xlsx_and_docx_include_profile_and_findings_sections(self):
         sid='sess-report-findings'
         schema_id,fields=self._mk_schema_with_fields()

@@ -37,6 +37,8 @@ from epc.db import (
 from epc.restitution import (
     restitution_manifest, session_restitution_manifest, resolve_model_key,
     qualitative_data, report_data, report_xlsx, report_docx, _n, _c,
+    individual_responses_rows, individual_responses_xlsx, individual_responses_csv,
+    filtered_analysis_rows, filtered_analysis_xlsx, filtered_analysis_csv,
 )
 from epc.auth import (
     AuthRequiredError, PermissionDeniedError, PUBLIC_API_EXACT, is_public_api,
@@ -422,6 +424,22 @@ class Handler(SimpleHTTPRequestHandler):
                 sid=path.split("/")[3];data=report_xlsx(db,sid);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"diagnostic",ext="xlsx")
             elif path.startswith("/api/sessions/") and path.endswith("/report.docx"):
                 sid=path.split("/")[3];data=report_docx(db,sid);mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document';name=export_filename(session_label(db,sid),"rapport",ext="docx")
+            elif path.startswith("/api/sessions/") and path.endswith("/individual-responses.xlsx"):
+                sid=path.split("/")[3];data=individual_responses_xlsx(db,sid);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"reponses-individuelles",ext="xlsx")
+            elif path.startswith("/api/sessions/") and path.endswith("/individual-responses.csv"):
+                sid=path.split("/")[3];data=individual_responses_csv(db,sid);mime='text/csv; charset=utf-8';name=export_filename(session_label(db,sid),"reponses-individuelles",ext="csv")
+            elif path.startswith("/api/sessions/") and (path.endswith("/filtered-analysis.xlsx") or path.endswith("/filtered-analysis.csv")):
+                sid=path.split("/")[3]
+                filters={}
+                for raw in query.get("filter", []):
+                    field_key, sep, values_part = raw.partition(":")
+                    if not sep:
+                        return self.json(400, {"error": "Paramètre filter invalide (attendu field_key:valeur[,valeur...])"})
+                    filters[field_key]=values_part.split(",")
+                if path.endswith(".xlsx"):
+                    data=filtered_analysis_xlsx(db,sid,filters);mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';name=export_filename(session_label(db,sid),"analyse-filtree",ext="xlsx")
+                else:
+                    data=filtered_analysis_csv(db,sid,filters);mime='text/csv; charset=utf-8';name=export_filename(session_label(db,sid),"analyse-filtree",ext="csv")
             else: data=None
             if data is not None:
                 self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Disposition',f'attachment; filename={name}');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(data);return
