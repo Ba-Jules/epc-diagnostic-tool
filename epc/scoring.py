@@ -27,6 +27,14 @@ from .profile import participants_matching_dimension_values, participants_matchi
 # low-confidence.
 MIN_COHORT_N = 5
 
+# Constats automatiques deterministes (mission de parite :8810->:8820, cf.
+# consignes_claude.txt) - mêmes seuils que la version de reference stable-simple :
+# FORCE_THRESHOLD s'aligne sur le plancher de la bande "Au-dessus de la moyenne",
+# FRAGILE_THRESHOLD sur le plancher de la bande "Moyen" (cf. level() cote JS).
+FORCE_THRESHOLD = 71
+FRAGILE_THRESHOLD = 60
+VIGILANCE_GAP_THRESHOLD = 15
+
 
 def grade(value, norm):
     """Classify value into a graduated band from norm (low, high, result) tuples.
@@ -55,6 +63,7 @@ def analysis(db, session_id: str):
     if result is None:
         return None
     result["session"] = dict(session)
+    result["findings"] = objective_findings(result)
     return result
 
 
@@ -130,6 +139,64 @@ def analysis_for(db, session_ids: list[str], participant_ids: set[str] | None = 
     global_graded_consensus=sum(graded_cons)/len(graded_cons) if graded_cons else None
     completed=len(rows(db,f"SELECT id FROM participants p WHERE p.session_id IN ({ph}) AND p.status='completed'{pid_clause}",(*session_ids,*pid_params)))
     return {"sessionIds": session_ids, "participantCount": total_participants, "completedCount":completed, "domains": output_domains, "global": {"responses": len(all_values), "capacity": global_capacity, "consensus":gc, "consensusNote": "single_respondent" if len(all_participant_ids) == 1 else None, "gradedCapacity": global_graded_capacity, "gradedConsensus": global_graded_consensus}}
+
+
+def objective_findings(result: dict, comparison: list | None = None) -> dict:
+    """Deterministic, non-AI findings from an already-computed analysis_for()
+    result (mission de parite :8810->:8820, cf. consignes_claude.txt) : forces
+    (capacite elevee, eventuellement doublee d'un consensus eleve), fragilites
+    (capacite faible - les domaines/indicateurs les plus faibles), points de
+    vigilance (capacite/consensus en désaccord, ou - quand `comparison` est
+    fourni - un ecart de capacite important entre sous-populations sur un
+    meme domaine). Chaque element porte les nombres qui le justifient
+    (valeur, N via "responses", domaine/indicateur concerne) : c'est une
+    lecture des donnees, jamais une cause inventee.
+
+    `comparison`, si fourni, est la liste de resultats analysis_for()-shapes
+    a comparer entre eux (typiquement la sortie de dimension_analysis_multi()
+    ou plusieurs filtered_analysis()) - un label de categorie est lu sur
+    chaque cohorte via son eventuelle cle "dimension"/"value", sinon "label",
+    sans jamais supposer un nom de dimension particulier."""
+    # Copies (never the live result["domains"]/indicator dicts) so annotating
+    # a finding item (alsoHighConsensus, domain label) never leaks a stray key
+    # back into the plain analysis payload shown elsewhere.
+    domains = [dict(d) for d in result["domains"] if d["capacity"] is not None]
+    indicators = [dict(i, domain=d["label"]) for d in result["domains"] for i in d["indicators"] if i["capacity"] is not None]
+
+    forces_domains = sorted([d for d in domains if d["capacity"] >= FORCE_THRESHOLD], key=lambda d: -d["capacity"])[:3]
+    forces_indicators = sorted([i for i in indicators if i["capacity"] >= FORCE_THRESHOLD], key=lambda i: -i["capacity"])[:5]
+    for item in forces_domains + forces_indicators:
+        item["alsoHighConsensus"] = item["consensus"] is not None and item["consensus"] >= FORCE_THRESHOLD
+
+    fragile_domains = sorted([d for d in domains if d["capacity"] < FRAGILE_THRESHOLD], key=lambda d: d["capacity"])[:3]
+    fragile_indicators = sorted([i for i in indicators if i["capacity"] < FRAGILE_THRESHOLD], key=lambda i: i["capacity"])[:5]
+
+    vigilance = []
+    for d in domains:
+        if d["consensus"] is None:
+            continue
+        if d["capacity"] >= FORCE_THRESHOLD and d["consensus"] < FRAGILE_THRESHOLD:
+            vigilance.append({"level": "domain", "id": d["id"], "label": d["label"], "capacity": d["capacity"], "consensus": d["consensus"], "responses": d["responses"], "reason": "capacite_elevee_consensus_faible"})
+        elif d["capacity"] < FRAGILE_THRESHOLD and d["consensus"] >= FORCE_THRESHOLD:
+            vigilance.append({"level": "domain", "id": d["id"], "label": d["label"], "capacity": d["capacity"], "consensus": d["consensus"], "responses": d["responses"], "reason": "capacite_faible_consensus_eleve"})
+
+    if comparison:
+        by_domain = {}
+        for cohort in comparison:
+            category_label = (cohort.get("dimension") or {}).get("value", cohort.get("label"))
+            for d in cohort.get("domains", []):
+                if d.get("capacity") is None:
+                    continue
+                by_domain.setdefault(d["id"], {"label": d["label"], "values": []})["values"].append({"category": category_label, "capacity": d["capacity"], "responses": d.get("responses")})
+        for did, info in by_domain.items():
+            caps = [v["capacity"] for v in info["values"]]
+            if len(caps) < 2:
+                continue
+            gap = max(caps) - min(caps)
+            if gap >= VIGILANCE_GAP_THRESHOLD:
+                vigilance.append({"level": "domain", "id": did, "label": info["label"], "reason": "ecart_sous_populations", "gap": gap, "values": info["values"]})
+
+    return {"forces": {"domains": forces_domains, "indicators": forces_indicators}, "fragilites": {"domains": fragile_domains, "indicators": fragile_indicators}, "vigilance": vigilance}
 
 
 def _suppress_small_cohort(result: dict) -> None:
@@ -213,4 +280,5 @@ def filtered_analysis(db, session_id: str, filters: dict, min_n: int = MIN_COHOR
     if suppressed:
         _suppress_small_cohort(result)
     result["filters"] = {"applied": [{"fieldKey": k, "fieldLabel": fields[k]["label"], "values": v} for k, v in filters.items()], "minRequired": min_n, "suppressed": suppressed}
+    result["findings"] = objective_findings(result)
     return result

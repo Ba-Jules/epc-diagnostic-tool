@@ -1240,6 +1240,107 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.filtered_analysis(self.db,sid,{'organisation':['ONG A']})
 
+    # --- Mission parite :8810->:8820 (consignes_claude.txt) : constats
+    # automatiques deterministes - epc/scoring.py objective_findings() ---
+
+    def _add_domain_responses(self,sid,domain_index,values):
+        """Inserts one completed participant per value in `values`, each
+        answering every indicator of the domain at display_order `domain_index`
+        (0-based) with that single value - lets a test control a domain's
+        capacity/consensus precisely without touching the other domains."""
+        t=self.db.execute('select template_id from sessions where id=?',(sid,)).fetchone()['template_id']
+        domain=self.db.execute('select id from domains where template_id=? order by display_order limit 1 offset ?',(t,domain_index)).fetchone()['id']
+        inds=[r['id'] for r in self.db.execute('select id from indicators where domain_id=? order by display_order',(domain,))]
+        for i,value in enumerate(values):
+            pid=f'{sid}-d{domain_index}-{i}'
+            self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,pid,'completed',app.now(),app.now(),None))
+            for iid in inds:
+                self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,iid,str(value),'numeric',app.now(),app.now()))
+        return domain
+
+    def _mk_findings_session(self,sid):
+        self._mk_session(sid)
+        domains={}
+        domains['force']=self._add_domain_responses(sid,0,[5,5,5,5,5])  # capacity 100, consensus 100 (sd=0)
+        domains['vigilance_hi_cap_lo_cons']=self._add_domain_responses(sid,1,[5,5,5,5,1])  # capacity 84, consensus ~10.6
+        domains['vigilance_lo_cap_hi_cons']=self._add_domain_responses(sid,2,[1,1,1,1,1])  # capacity 20, consensus 100
+        domains['fragile_only']=self._add_domain_responses(sid,3,[1,1,1,1,3])  # capacity 28, consensus ~55.3
+        self.db.commit()
+        return domains
+
+    def test_objective_findings_flags_force_with_high_consensus(self):
+        sid='sess-find-forces'; domains=self._mk_findings_session(sid)
+        findings=app.objective_findings(app.analysis_for(self.db,[sid]))
+        force_ids=[d['id'] for d in findings['forces']['domains']]
+        self.assertIn(domains['force'],force_ids)
+        force=next(d for d in findings['forces']['domains'] if d['id']==domains['force'])
+        self.assertEqual(force['capacity'],100)
+        self.assertTrue(force['alsoHighConsensus'])
+        self.assertEqual(force['responses'],5)
+
+    def test_objective_findings_flags_fragile_domains(self):
+        sid='sess-find-fragile'; domains=self._mk_findings_session(sid)
+        findings=app.objective_findings(app.analysis_for(self.db,[sid]))
+        fragile_ids=[d['id'] for d in findings['fragilites']['domains']]
+        self.assertIn(domains['fragile_only'],fragile_ids)
+        self.assertIn(domains['vigilance_lo_cap_hi_cons'],fragile_ids)
+
+    def test_objective_findings_flags_vigilance_high_capacity_low_consensus(self):
+        sid='sess-find-vig1'; domains=self._mk_findings_session(sid)
+        findings=app.objective_findings(app.analysis_for(self.db,[sid]))
+        entry=next(v for v in findings['vigilance'] if v['id']==domains['vigilance_hi_cap_lo_cons'])
+        self.assertEqual(entry['reason'],'capacite_elevee_consensus_faible')
+        self.assertAlmostEqual(entry['capacity'],84)
+
+    def test_objective_findings_flags_vigilance_low_capacity_high_consensus(self):
+        sid='sess-find-vig2'; domains=self._mk_findings_session(sid)
+        findings=app.objective_findings(app.analysis_for(self.db,[sid]))
+        entry=next(v for v in findings['vigilance'] if v['id']==domains['vigilance_lo_cap_hi_cons'])
+        self.assertEqual(entry['reason'],'capacite_faible_consensus_eleve')
+        self.assertEqual(entry['consensus'],100)
+
+    def test_objective_findings_never_invents_a_cause_for_plain_fragile_domain(self):
+        # capacite faible mais consensus moyen (< FORCE_THRESHOLD) : fragile
+        # seul, ne doit PAS apparaitre en vigilance (pas de desaccord capacite/consensus).
+        sid='sess-find-nofalsepositive'; domains=self._mk_findings_session(sid)
+        findings=app.objective_findings(app.analysis_for(self.db,[sid]))
+        vigilance_ids=[v['id'] for v in findings['vigilance']]
+        self.assertNotIn(domains['fragile_only'],vigilance_ids)
+
+    def test_objective_findings_comparison_flags_gap_between_sub_populations(self):
+        sid='sess-find-gap'; self._mk_dimension_session(sid)  # F capacity 100, M capacity 20 on domain 0
+        results=app.dimension_analysis_multi(self.db,sid,'genre',['F','M'])
+        findings=app.objective_findings(app.analysis(self.db,sid),comparison=results)
+        gap_entries=[v for v in findings['vigilance'] if v['reason']=='ecart_sous_populations']
+        self.assertEqual(len(gap_entries),1)
+        self.assertEqual(gap_entries[0]['gap'],80)
+
+    def test_objective_findings_does_not_mutate_the_source_result(self):
+        # Regression guard: annotating a "force" item must never leak an extra
+        # key back into the plain analysis payload (result["domains"]) shown
+        # elsewhere - objective_findings() must copy, never alias, domain dicts.
+        sid='sess-find-nomutate'; self._mk_findings_session(sid)
+        result=app.analysis_for(self.db,[sid])
+        app.objective_findings(result)
+        self.assertNotIn('alsoHighConsensus',result['domains'][0])
+
+    def test_analysis_embeds_findings(self):
+        sid='sess-find-embed'; domains=self._mk_findings_session(sid)
+        out=app.analysis(self.db,sid)
+        self.assertIn('findings',out)
+        self.assertIn(domains['force'],[d['id'] for d in out['findings']['forces']['domains']])
+
+    def test_filtered_analysis_embeds_findings(self):
+        sid='sess-find-filtered'; self._mk_combined_filter_session(sid)
+        result=app.filtered_analysis(self.db,sid,{'genre':['F'],'langues':['fr']})
+        self.assertIn('findings',result)
+
+    def test_filtered_analysis_suppressed_cohort_has_no_findings(self):
+        sid='sess-find-suppressed'; self._mk_dimension_session(sid,n_f=2,n_m=8)
+        result=app.filtered_analysis(self.db,sid,{'genre':['F']})
+        self.assertTrue(result['filters']['suppressed'])
+        self.assertEqual(result['findings']['forces']['domains'],[])
+        self.assertEqual(result['findings']['fragilites']['domains'],[])
 
     # --- Lot 7 (modularisation, AUDIT_MODULARISATION_8800.md) : migration V1
     # (analysis_notes/recommendations) -> V2 (analysis_entries/

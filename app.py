@@ -70,7 +70,7 @@ from epc.qualitatif import (
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
     migrate_legacy_qualitative_data,
 )
-from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, filtered_analysis, MIN_COHORT_N
+from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, filtered_analysis, objective_findings, MIN_COHORT_N
 from epc.profile import (
     create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
     create_profile_field, update_profile_field, delete_profile_field,
@@ -399,7 +399,13 @@ class Handler(SimpleHTTPRequestHandler):
                     # docstring) - always returns {"results": [...]}, even for a
                     # single value, so callers don't need two response shapes.
                     try:
-                        return self.json(200, {"results": dimension_analysis_multi(db, sid, dimension, values)})
+                        results = dimension_analysis_multi(db, sid, dimension, values)
+                        # Findings base on the whole, unfiltered session (never on a
+                        # single cohort) so "forces"/"fragilites" stay comparable across
+                        # calls; "comparison" additionally flags capacity gaps between
+                        # the compared cohorts themselves (see objective_findings()).
+                        findings = objective_findings(analysis(db, sid), comparison=results)
+                        return self.json(200, {"results": results, "findings": findings})
                     except ValueError as e:
                         return self.json(400, {"error": str(e)})
                 result = analysis(db, sid)
