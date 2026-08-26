@@ -107,7 +107,16 @@ async function runDimensionFilter(sessionId){
   }catch(err){return notice(err.message)}
   window.dimensionResults={key,values,results};
   let suppressedValues=results.filter(r=>r.dimension.suppressed).map(r=>r.dimension.value);
-  document.querySelector('#dim-result').innerHTML=comparisonTableHtml(results,r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`)
+  // Résumé Catégorie|N|Capacité|Consensus|Graduations (mission de parite
+  // :8810->:8820, cf. consignes_claude.txt), puis le graphique bars() sur ces
+  // memes categories, puis le detail par domaine deja fourni par
+  // comparisonTableHtml (partagee avec la comparaison de groupes/campagnes).
+  let categoryRows=`<div class="table-wrap"><table><tr><th>Catégorie</th><th>N</th><th>Capacité</th><th>Consensus</th><th>Graduations</th></tr>${results.map(r=>`<tr><td>${esc(r.dimension.value)}</td><td>${r.completedCount}</td><td>${fmt(r.global.capacity)}</td><td>${fmtConsensus(r.global)}</td><td>${r.global.gradedCapacity??'—'} / ${r.global.gradedConsensus??'—'}</td></tr>`).join('')}</table></div>`;
+  let categoryBars=results.map(r=>({label:r.dimension.value,code:r.dimension.value,capacity:r.global.capacity,consensus:r.global.consensus,gradedCapacity:r.global.gradedCapacity,gradedConsensus:r.global.gradedConsensus}));
+  document.querySelector('#dim-result').innerHTML=categoryRows
+    +bars(categoryBars,'standard')+bars(categoryBars,'graded')
+    +`<h3 style="margin-top:1.2rem">Comparaison par domaine</h3>`
+    +comparisonTableHtml(results,r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`)
     +(suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Effectif insuffisant (moins de ${results[0].dimension.minRequired} participants validés) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}. Résultats masqués pour préserver l’anonymat.</p>`:'')
     +`<button class="secondary" style="margin-top:.6rem" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button>`;
 }
