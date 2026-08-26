@@ -268,3 +268,24 @@ def participants_matching_dimension(db: sqlite3.Connection, session_id: str, fie
     equals (single_choice) or contains (multi_choice) `value`. Caller must
     have already validated field_key via resolve_dimension_field."""
     return participants_matching_dimension_values(db, session_id, field_key, [value])[value]
+
+
+def participants_matching_filters(db: sqlite3.Connection, session_id: str, filters: dict) -> set[str]:
+    """Participant ids of `session_id` matching EVERY given dimension filter
+    at once (AND across filters, OR between the values listed for a single
+    filter) - the combinable multi-dimension primitive: `filters` is any
+    subset of the session's active dimensions, keyed by field_key, so no
+    dimension name is ever hardcoded here. Caller must have already validated
+    every field_key via resolve_dimension_field (same contract as
+    participants_matching_dimension). An empty `filters` dict matches every
+    participant of the session (no restriction applied)."""
+    if not filters:
+        return {r["id"] for r in rows(db, "SELECT id FROM participants WHERE session_id=?", (session_id,))}
+    matched: set[str] | None = None
+    for field_key, values in filters.items():
+        per_value = participants_matching_dimension_values(db, session_id, field_key, values)
+        matching_any_value = set().union(*per_value.values()) if per_value else set()
+        matched = matching_any_value if matched is None else matched & matching_any_value
+        if not matched:
+            break
+    return matched or set()

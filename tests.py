@@ -1180,6 +1180,67 @@ class EngineTests(unittest.TestCase):
         sid='sess-dim-regression'; self._mk_dimension_session(sid)
         self.assertEqual(app.analysis_for(self.db,[sid]),app.analysis_for(self.db,[sid],participant_ids=None))
 
+    # --- Mission parite :8810->:8820 (consignes_claude.txt) : filtres
+    # combinables entre PLUSIEURS dimensions differentes a la fois (par
+    # opposition a dimension_analysis_multi, qui compare plusieurs valeurs
+    # d'UNE seule dimension) - epc/profile.py participants_matching_filters()
+    # / epc/scoring.py filtered_analysis() ---
+
+    def _mk_combined_filter_session(self,sid):
+        schema_id,fields=self._mk_schema_with_fields()
+        app.update_profile_field(self.db,fields['genre'],{'isDimension':True})
+        app.update_profile_field(self.db,fields['langues'],{'isDimension':True})
+        tid=self._mk_session(sid,profile_schema_id=schema_id)
+        # Matches BOTH filters (genre=F and langues contains fr): value 5 -> capacity 100
+        for i in range(5):
+            pid=f'{sid}-f-fr{i}'; self._add_participant(sid,pid,tid,value=5,n=1)
+            app.set_participant_profile_values(self.db,pid,{'genre':'F','langues':['fr']})
+        # Matches genre=F only (langues=en): must NOT leak into the combined cohort
+        for i in range(5):
+            pid=f'{sid}-f-en{i}'; self._add_participant(sid,pid,tid,value=3,n=1)
+            app.set_participant_profile_values(self.db,pid,{'genre':'F','langues':['en']})
+        # Matches langues=fr only (genre=M): must NOT leak into the combined cohort
+        for i in range(5):
+            pid=f'{sid}-m-fr{i}'; self._add_participant(sid,pid,tid,value=1,n=1)
+            app.set_participant_profile_values(self.db,pid,{'genre':'M','langues':['fr']})
+        self.db.commit()
+        return schema_id
+
+    def test_filtered_analysis_combines_multiple_dimensions_with_and(self):
+        sid='sess-filters-and'; self._mk_combined_filter_session(sid)
+        result=app.filtered_analysis(self.db,sid,{'genre':['F'],'langues':['fr']})
+        self.assertEqual(result['completedCount'],5)
+        self.assertEqual(result['domains'][0]['capacity'],100)
+        self.assertEqual(result['filters']['applied'],[{'fieldKey':'genre','fieldLabel':'Genre','values':['F']},{'fieldKey':'langues','fieldLabel':'Langues','values':['fr']}])
+        self.assertFalse(result['filters']['suppressed'])
+
+    def test_filtered_analysis_or_within_one_filter_and_across_filters(self):
+        # genre in [F,M] (matches everyone) AND langues=fr (only fr speakers):
+        # OR is per-filter, AND is between filters.
+        sid='sess-filters-or'; self._mk_combined_filter_session(sid)
+        result=app.filtered_analysis(self.db,sid,{'genre':['F','M'],'langues':['fr']})
+        self.assertEqual(result['completedCount'],10)
+
+    def test_filtered_analysis_empty_filters_is_whole_session(self):
+        sid='sess-filters-empty'; self._mk_combined_filter_session(sid)
+        empty_filter=app.filtered_analysis(self.db,sid,{})
+        whole=app.analysis(self.db,sid)
+        self.assertEqual(empty_filter['completedCount'],whole['completedCount'])
+        self.assertEqual(empty_filter['domains'],whole['domains'])
+        self.assertEqual(empty_filter['global'],whole['global'])
+
+    def test_filtered_analysis_no_matching_participant_returns_empty_cohort(self):
+        sid='sess-filters-none'; self._mk_combined_filter_session(sid)
+        result=app.filtered_analysis(self.db,sid,{'genre':['Autre']})
+        self.assertEqual(result['completedCount'],0)
+        self.assertTrue(result['filters']['suppressed'])
+
+    def test_filtered_analysis_refuses_unflagged_dimension(self):
+        sid='sess-filters-refuse'; self._mk_session(sid,profile_schema_id=self._mk_schema_with_fields()[0])
+        with self.assertRaises(ValueError):
+            app.filtered_analysis(self.db,sid,{'organisation':['ONG A']})
+
+
     # --- Lot 7 (modularisation, AUDIT_MODULARISATION_8800.md) : migration V1
     # (analysis_notes/recommendations) -> V2 (analysis_entries/
     # workshop_recommendations) - epc/qualitatif.py

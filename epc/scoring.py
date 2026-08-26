@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from .db import rows, template_payload
-from .profile import participants_matching_dimension_values, resolve_dimension_field
+from .profile import participants_matching_dimension_values, participants_matching_filters, resolve_dimension_field
 
 # Cohorts smaller than this have every capacity/consensus number suppressed
 # in dimension_analysis() (lot 5, cf. AUDIT_MODULARISATION_8800.md - flagged
@@ -185,3 +185,32 @@ def dimension_analysis(db, session_id: str, field_key: str, value, min_n: int = 
     """Single-value convenience wrapper over dimension_analysis_multi()."""
     results = dimension_analysis_multi(db, session_id, field_key, [value], min_n=min_n)
     return results[0] if results else None
+
+
+def filtered_analysis(db, session_id: str, filters: dict, min_n: int = MIN_COHORT_N):
+    """Same EPC calculation as analysis(), restricted to the single cohort of
+    `session_id`'s participants matching EVERY given dimension filter at once
+    (combinable multi-dimension filtering) - distinct from
+    dimension_analysis_multi(), which instead compares several values of one
+    dimension side by side as separate cohorts. `filters` is
+    {field_key: [values]}; every field_key must be an active, pilot-flagged
+    dimension (validated here via resolve_dimension_field, same privacy gate
+    as the rest of lot 5) - no field name is ever hardcoded. An empty
+    `filters` dict returns the whole session's analysis, unrestricted.
+
+    Recomputes directly from individual responses (analysis_for), never a
+    mean-of-means - a cohort of N=1 still yields a real capacity with
+    consensus reported as "single_respondent"; N=0 yields an all-None result
+    (participantCount/completedCount at 0), and the caller must render that
+    as an explicit "aucun participant" message rather than blank zeros.
+    """
+    fields = {field_key: resolve_dimension_field(db, session_id, field_key) for field_key in filters}
+    matches = participants_matching_filters(db, session_id, filters)
+    result = analysis_for(db, [session_id], participant_ids=matches)
+    if result is None:
+        return None
+    suppressed = result["completedCount"] < min_n
+    if suppressed:
+        _suppress_small_cohort(result)
+    result["filters"] = {"applied": [{"fieldKey": k, "fieldLabel": fields[k]["label"], "values": v} for k, v in filters.items()], "minRequired": min_n, "suppressed": suppressed}
+    return result
