@@ -747,6 +747,64 @@ class EngineTests(unittest.TestCase):
         self.assertIsNotNone(sid)
         self.assertEqual(self.db.execute('select name from sessions where id=?',(sid,)).fetchone()['name'],'Atelier valide')
 
+    # --- Mission parite :8810->:8820 (consignes_claude.txt) : profil EPC/SENEVAL
+    # par defaut - PAS des colonnes en dur, seulement les valeurs par defaut du
+    # modele EPC/SENEVAL creees via le moteur generique profile_schema/
+    # profile_fields - epc/profile.py ensure_default_profile_schema() ---
+
+    def test_create_session_attaches_default_epc_profile_with_five_dimensions(self):
+        t=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        sid=app.create_session(self.db,'owner-epc',{'templateId':t,'name':'Atelier EPC'})
+        schema_id=self.db.execute('select profile_schema_id from sessions where id=?',(sid,)).fetchone()['profile_schema_id']
+        self.assertIsNotNone(schema_id)
+        dims=app.available_dimensions(self.db,sid)
+        self.assertEqual(len(dims),5)
+        self.assertEqual({d['fieldKey'] for d in dims},{'type-de-participant','profil','sexe','tranche-dage','niveau-de-scolarisation'})
+
+    def test_default_epc_profile_fields_are_modifiable_and_deletable(self):
+        # "modifiable/desactivable par le pilote" (consignes_claude.txt) : une
+        # fois crees, ce sont des profile_fields ordinaires - meme API que
+        # n'importe quel champ saisi a la main.
+        t=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        sid=app.create_session(self.db,'owner-epc2',{'templateId':t,'name':'Atelier EPC 2'})
+        schema_id=self.db.execute('select profile_schema_id from sessions where id=?',(sid,)).fetchone()['profile_schema_id']
+        payload=app.profile_schema_payload(self.db,schema_id)
+        sexe_field=next(f for f in payload['fields'] if f['field_key']=='sexe')
+        app.update_profile_field(self.db,sexe_field['id'],{'active':False})
+        deleted,used=app.delete_profile_field(self.db,sexe_field['id'])
+        self.assertTrue(deleted)
+
+    def test_create_session_respects_an_explicit_profile_schema_id(self):
+        schema_id,_=self._mk_schema_with_fields(owner='owner-custom')
+        t=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        sid=app.create_session(self.db,'owner-epc3',{'templateId':t,'name':'Atelier profil custom','profileSchemaId':schema_id})
+        self.assertEqual(self.db.execute('select profile_schema_id from sessions where id=?',(sid,)).fetchone()['profile_schema_id'],schema_id)
+
+    def test_create_session_on_a_blank_template_gets_no_default_profile(self):
+        # resolve_model_key() (epc/restitution.py) fait retomber tout modele
+        # custom/vide sur "epc_seneval" pour les BESOINS DU RAPPORT uniquement -
+        # ensure_default_profile_schema() ne doit jamais s'appuyer sur ce
+        # fallback, sinon un questionnaire personnalise heriterait a tort des
+        # 5 dimensions EPC (Type/Profil/Sexe/Age/Scolarisation n'ont aucun sens
+        # pour un modele qui n'est pas reellement EPC/SENEVAL).
+        blank_tid=app.create_blank_template(self.db,{'name':'Modele sur mesure'})
+        app.create_domain(self.db,blank_tid,{'label':'Domaine'})
+        domain_id=self.db.execute('select id from domains where template_id=?',(blank_tid,)).fetchone()['id']
+        app.create_indicator(self.db,domain_id,{'label':'Indicateur'})
+        self.db.commit()
+        sid=app.create_session(self.db,'owner-blank',{'templateId':blank_tid,'name':'Atelier sur mesure'})
+        self.assertIsNone(self.db.execute('select profile_schema_id from sessions where id=?',(sid,)).fetchone()['profile_schema_id'])
+
+    def test_create_group_also_attaches_default_epc_profile(self):
+        uid=self._mk_user('u-grp-profile')
+        t=self.db.execute("select id,version from templates where name='EPC / SENEVAL'").fetchone()
+        cid=app.create_campaign(self.db,uid,t['id'],t['version'],{'name':'Campagne EPC'})
+        camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        g=app.create_group(self.db,camp,uid,{'name':'Groupe A'})
+        schema_id=self.db.execute('select profile_schema_id from sessions where id=?',(g['id'],)).fetchone()['profile_schema_id']
+        self.assertIsNotNone(schema_id)
+        self.assertEqual(len(app.available_dimensions(self.db,g['id'])),5)
+
     def test_update_session_rejects_unknown_template(self):
         self._mk_session('sess-upd')
         self.assertFalse(app.update_session(self.db,'sess-upd',{'name':'x','templateId':'does-not-exist'}))

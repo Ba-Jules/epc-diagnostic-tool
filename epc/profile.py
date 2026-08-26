@@ -41,6 +41,45 @@ def _session_profile_schema_id(db: sqlite3.Connection, session_id: str) -> str |
     return session["profile_schema_id"] if session else None
 
 
+# Model-driven default profile schemas (mission de parite :8810->:8820, cf.
+# consignes_claude.txt) - PAS des colonnes metier codees en dur : ce sont
+# uniquement les valeurs par defaut du modele EPC/SENEVAL, creees via le
+# moteur generique profile_schema/profile_fields ci-dessous, au meme titre
+# que RESTITUTION_MANIFESTS (epc/restitution.py) pour le rapport. Une fois
+# crees par ensure_default_profile_schema(), ce sont des profile_fields
+# ordinaires : le pilote peut les desactiver, les modifier, les supprimer ou
+# en ajouter d'autres, exactement comme un champ saisi a la main.
+DEFAULT_PROFILE_SCHEMAS = {
+    "epc_seneval": {
+        "name": "Profil participant EPC/SENEVAL",
+        "fields": [
+            {"label": "Type de participant", "fieldType": "single_choice", "options": ["Institutionnel", "Individuel"]},
+            {"label": "Profil", "fieldType": "single_choice", "options": ["ONG", "Administration", "Université", "Secteur privé", "Étudiant", "Professionnel", "Autre"]},
+            {"label": "Sexe", "fieldType": "single_choice", "options": ["Homme", "Femme"]},
+            {"label": "Tranche d’âge", "fieldType": "single_choice", "options": ["18–24", "25–39", "40–54", "55–64", "65+"]},
+            {"label": "Niveau de scolarisation", "fieldType": "single_choice", "options": ["BFEM", "BAC", "Licence", "Master / DEA", "Doctorat", "Autre"]},
+        ],
+    },
+}
+
+
+def ensure_default_profile_schema(db: sqlite3.Connection, owner_user_id: str | None, model_key: str) -> str | None:
+    """Creates a fresh profile schema pre-populated with `model_key`'s default
+    fields (all flagged is_dimension=True - they're meant to be immediately
+    filterable/comparable), or returns None if no default is defined for that
+    model. Called on session/group creation when the caller hasn't explicitly
+    supplied a profileSchemaId, so a brand-new EPC/SENEVAL workshop isn't
+    "profile-less" by accident - a pilot who genuinely wants no profile can
+    still detach/delete it afterwards via the ordinary profile-schema API."""
+    spec = DEFAULT_PROFILE_SCHEMAS.get(model_key)
+    if not spec:
+        return None
+    schema_id = create_profile_schema(db, owner_user_id, {"name": spec["name"]})
+    for field in spec["fields"]:
+        create_profile_field(db, schema_id, {**field, "isDimension": True})
+    return schema_id
+
+
 def create_profile_schema(db: sqlite3.Connection, owner_user_id: str | None, data: dict) -> str:
     name = (data.get("name") or "").strip()
     if not name:

@@ -15,6 +15,7 @@ from io import BytesIO
 
 from .auth import relay_token_hash
 from .db import now, rows, template_payload
+from .profile import ensure_default_profile_schema
 from .util import slugify
 
 # Every table that hangs off a session row via session_id — deleting a session (alone,
@@ -167,10 +168,17 @@ def create_group(db: sqlite3.Connection, campaign, owner_user_id: str, data: dic
     group_color = GROUP_COLORS[len(campaign_codes) % len(GROUP_COLORS)]
     sid = str(uuid.uuid4())
     raw_token = secrets.token_urlsafe(24)
+    profile_schema_id = data.get("profileSchemaId")
+    if profile_schema_id is None:
+        template = template_payload(db, campaign["template_id"])
+        # The template's OWN model_key (never the restitution fallback that
+        # treats every untagged/custom questionnaire as EPC/SENEVAL for report
+        # purposes) - a default profile is only a fit for the genuine model.
+        profile_schema_id = ensure_default_profile_schema(db, owner_user_id, template.get("model_key"))
     db.execute("INSERT INTO sessions (id,template_id,template_version,name,organization,location,date,status,created_at,closed_at,description,expected_participants,owner_user_id,campaign_id,group_code,group_color,relay_name,relay_token_hash,profile_schema_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, campaign["template_id"], campaign["template_version"], data["name"], "", "", "", "open", now(), None, "",
          int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None,
-         owner_user_id, campaign["id"], group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token), data.get("profileSchemaId")))
+         owner_user_id, campaign["id"], group_code, group_color, data.get("relayName") or "", relay_token_hash(raw_token), profile_schema_id))
     db.commit()
     return {"id": sid, "groupCode": group_code, "groupColor": group_color, "relayToken": raw_token}
 
@@ -189,9 +197,15 @@ def create_session(db: sqlite3.Connection, owner_user_id: str, data: dict):
     if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]):
         return None
     sid = str(uuid.uuid4())
+    profile_schema_id = data.get("profileSchemaId")
+    if profile_schema_id is None:
+        # The template's OWN model_key (never the restitution fallback that
+        # treats every untagged/custom questionnaire as EPC/SENEVAL for report
+        # purposes) - a default profile is only a fit for the genuine model.
+        profile_schema_id = ensure_default_profile_schema(db, owner_user_id, template.get("model_key"))
     db.execute("INSERT INTO sessions (id,template_id,template_version,name,organization,location,date,status,created_at,closed_at,description,expected_participants,owner_user_id,campaign_id,group_code,group_color,relay_name,relay_token_hash,profile_schema_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""),
-         int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, owner_user_id, None, None, None, None, None, data.get("profileSchemaId")))
+         int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, owner_user_id, None, None, None, None, None, profile_schema_id))
     db.commit()
     return sid
 
