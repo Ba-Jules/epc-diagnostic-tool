@@ -152,10 +152,20 @@ async function runAiPlan(sid,btn){await aiRun(sid,'/api/sessions/'+sid+'/ai/plan
 },btn)}
 
 /* --- Rapport final --- */
-const AI_SECTION_LABELS_JS={resume_executif:'Résumé exécutif',lecture_diagnostic:'Lecture du diagnostic',synthese_domaines:'Synthèse par domaine',synthese_priorites:'Synthèse des priorités',synthese_recommandations:'Synthèse des recommandations',synthese_formations:'Synthèse des besoins de formation',synthese_plan:"Synthèse du plan d'action",conclusion:'Conclusion générale proposée'};
+const AI_SECTION_LABELS_JS={resume_executif:'Résumé exécutif',lecture_diagnostic:'Lecture du diagnostic',synthese_domaines:'Synthèse par domaine',synthese_priorites:'Synthèse des priorités',synthese_recommandations:'Synthèse des recommandations',synthese_formations:'Synthèse des besoins de formation',synthese_plan:"Synthèse du plan d'action",conclusion:'Conclusion générale proposée',synthese_finale:'Synthèse finale'};
 const finalReportAiBase=finalReport;finalReport=async s=>{await finalReportAiBase(s);let c=await aiIsReady();if(!c)return;
   app.querySelector('.report-nav')?.insertAdjacentHTML('beforeend','<a href="#Synthese-IA">Synthèse IA</a>');
   app.querySelector('article.report')?.insertAdjacentHTML('beforeend',`<section id="Synthese-IA" class="card"><div class="section-header"><h3>✦ Synthèse assistée par IA</h3></div><p class="muted small">Ces textes sont des propositions rédactionnelles ; les données et scores EPC ci-dessus restent la source primaire du diagnostic. Chaque section n’apparaît dans le rapport exporté qu’après avoir été explicitement retenue.</p>${aiButtonHtml('Préparer le rapport complet',`runAiReportFull('${s}',this)`)}${Object.keys(AI_SECTION_LABELS_JS).map(k=>`<div style="margin-top:1rem"><h4>${esc(AI_SECTION_LABELS_JS[k])}</h4>${aiButtonHtml('Générer une synthèse assistée par IA',`runAiReportSection('${s}','${k}',this)`)}<div id="ai-report-${k}-box" style="margin-top:.6rem"></div></div>`).join('')}</section>`);
+  loadAiReportBlocks(s)
+};
+// Restaure l'action IA "Proposer une rédaction de synthèse" sur l'écran
+// Synthèse finale (mission de parite :8810->:8820, cf. consignes_claude.txt).
+// Reutilise le mecanisme generique deja partage avec finalReport() (meme
+// section "synthese_finale", meme sauvegarde retenue/rejetable) - sans IA
+// activee, la synthese deterministe ci-dessus reste complete, ce bloc ne
+// s'affiche simplement pas.
+const finalSummaryAiBase=finalSummary;finalSummary=async s=>{await finalSummaryAiBase(s);let c=await aiIsReady();if(!c)return;
+  app.querySelector('section.card')?.insertAdjacentHTML('beforeend',`<div style="margin-top:1.2rem"><h3>✦ Assistant IA</h3><p class="muted small">Propose une rédaction de synthèse à partir des données ci-dessus (jamais un recalcul des scores). Le texte reste modifiable et n’apparaît dans le rapport exporté qu’après avoir été explicitement retenu.</p>${aiButtonHtml('Proposer une rédaction de synthèse',`runAiReportSection('${s}','synthese_finale',this)`)}<div id="ai-report-synthese_finale-box" style="margin-top:.6rem"></div></div>`);
   loadAiReportBlocks(s)
 };
 async function loadAiReportBlocks(sid){try{let blocks=await api('/api/sessions/'+sid+'/ai/report-blocks');blocks.forEach(b=>{let box=document.querySelector('#ai-report-'+b.section_key+'-box');if(box)box.innerHTML=aiTextRetainCardHtml('ai-report-'+b.section_key+'-box',b.content,`retainAiReportSection('${sid}','${b.section_key}')`,`runAiReportSection('${sid}','${b.section_key}',this)`)})}catch(_){}}

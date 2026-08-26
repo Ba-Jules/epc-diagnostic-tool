@@ -271,7 +271,25 @@ def _parse_json_list(text):
 def ai_report_context(db, sid):
     r = report_data(db, sid)
     q, m = r["qualitative"], r["meta"]
-    lines = [ai_epc_context(db, sid), "", f"Contexte de l'atelier : {m.get('context') or 'non renseigné'}", "", "Priorités et analyses validées :"]
+    lines = [ai_epc_context(db, sid), "", f"Contexte de l'atelier : {m.get('context') or 'non renseigné'}"]
+    # Profil agrege + constats automatiques (mission de parite :8810->:8820,
+    # cf. consignes_claude.txt) : le contexte IA du rapport reste limite aux
+    # donnees calculees/agregees, jamais aux identites individuelles.
+    if r["profile"]:
+        lines += ["", "Profil agrégé des participants :"] + [f"- {field} — {value} : {n}" for field, value, n in r["profile"]]
+    findings = r["analysis"].get("findings")
+    if findings:
+        lines += ["", "Constats automatiques (forces / fragilités / points de vigilance) :"]
+        lines += [f"- Force : {d['label']} (capacité {_n(d['capacity'])})" for d in findings["forces"]["domains"]]
+        lines += [f"- Force : {i['domain']} — {i['label']} (capacité {_n(i['capacity'])})" for i in findings["forces"]["indicators"]]
+        lines += [f"- Fragilité : {d['label']} (capacité {_n(d['capacity'])})" for d in findings["fragilites"]["domains"]]
+        lines += [f"- Fragilité : {i['domain']} — {i['label']} (capacité {_n(i['capacity'])})" for i in findings["fragilites"]["indicators"]]
+        for v in findings["vigilance"]:
+            if v["reason"] == "ecart_sous_populations":
+                lines.append(f"- Vigilance : écart de {_n(v.get('gap'))} points pour {v['label']} entre sous-populations comparées")
+            else:
+                lines.append(f"- Vigilance : {v['label']} (capacité {_n(v.get('capacity'))}, consensus {_n(v.get('consensus'))})")
+    lines += ["", "Priorités et analyses validées :"]
     for p in q["priorities"]:
         an = next((x for x in q["analyses"] if x["priority_id"] == p["id"]), None)
         retained = [e for e in q["entries"] if e["priority_id"] == p["id"] and e["validation_status"] == "RETENU"]

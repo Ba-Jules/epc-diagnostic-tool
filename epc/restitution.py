@@ -68,6 +68,10 @@ AI_REPORT_SECTIONS_EPC_SENEVAL = {
     "synthese_formations": ("Synthèse des besoins de formation", "Rédige une SYNTHÈSE DES BESOINS DE FORMATION retenus."),
     "synthese_plan": ("Synthèse du plan d'action", "Rédige une SYNTHÈSE DU PLAN D'ACTION à partir des recommandations retenues."),
     "conclusion": ("Conclusion générale proposée", "Propose une CONCLUSION GÉNÉRALE concise et institutionnelle. Précise qu'il s'agit d'une proposition, pas d'une décision validée."),
+    # Mission de parite :8810->:8820 (cf. consignes_claude.txt) : restaure
+    # l'action "Proposer une rédaction de synthèse" de :8810, rattachée à
+    # l'écran Synthèse finale (static/app-augmentations.js finalSummary()).
+    "synthese_finale": ("Synthèse finale", "Rédige une SYNTHÈSE FINALE de l'atelier reprenant la participation, le profil des participants, le diagnostic global, les forces, les fragilités et points de vigilance, les désagrégations/comparaisons retenues, les priorités retenues, les analyses et les recommandations retenues. Ne recalcule et n'invente aucun chiffre : reprends exactement les données fournies."),
 }
 
 RESTITUTION_MANIFESTS = {

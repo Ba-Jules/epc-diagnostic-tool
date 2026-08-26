@@ -1529,9 +1529,26 @@ class EngineTests(unittest.TestCase):
         manifest=app.restitution_manifest({'model_key':'epc_seneval'})
         self.assertEqual(manifest['modelKey'],'epc_seneval')
         self.assertEqual(manifest['reportSections'],['synthese','profil_participants','domaines','indicateurs','constats','priorites','analyses','causes','consequences','leviers','recommandations','formations','plan_action','questionnaire'])
-        self.assertEqual(len(manifest['aiReportSections']),8)
+        self.assertEqual(len(manifest['aiReportSections']),9)
         self.assertEqual(set(manifest['aiReportSections']),set(manifest['aiSectionLabels']))
         self.assertIn('EPC/SENEVAL',manifest['aiSystemPrompt'])
+        # Mission de parite :8810->:8820 (consignes_claude.txt) : restaure
+        # l'action IA "Proposer une rédaction de synthèse" sur la Synthèse finale.
+        self.assertIn('synthese_finale',manifest['aiReportSections'])
+        self.assertEqual(manifest['aiSectionLabels']['synthese_finale'],'Synthèse finale')
+
+    def test_ai_report_context_includes_aggregate_profile_and_findings(self):
+        sid='sess-ai-context'
+        schema_id,fields=self._mk_schema_with_fields()
+        t=self._mk_session(sid,profile_schema_id=schema_id)
+        for i,v in enumerate([5]*5): self._add_participant(sid,f'p{i}',t,value=v)
+        app.set_participant_profile_values(self.db,'p0',{'genre':'F'})
+        self.db.commit()
+        context=app.ai_report_context(self.db,sid)
+        self.assertIn('Profil agrégé des participants',context)
+        self.assertIn('Genre — F',context)
+        self.assertIn('Constats automatiques',context)
+        self.assertIn('Force :',context)
 
     def test_restitution_manifest_falls_back_to_epc_seneval_for_an_unknown_model_key(self):
         # Defensive default (no second model exists yet to actually hit this
