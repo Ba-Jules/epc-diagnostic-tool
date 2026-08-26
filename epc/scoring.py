@@ -254,31 +254,32 @@ def dimension_analysis(db, session_id: str, field_key: str, value, min_n: int = 
     return results[0] if results else None
 
 
-def filtered_analysis(db, session_id: str, filters: dict, min_n: int = MIN_COHORT_N):
+def filtered_analysis(db, session_id: str, filters: dict):
     """Same EPC calculation as analysis(), restricted to the single cohort of
     `session_id`'s participants matching EVERY given dimension filter at once
-    (combinable multi-dimension filtering) - distinct from
+    (combinable multi-dimension filtering, mission de parite :8810->:8820,
+    cf. consignes_claude.txt section 5) - distinct from
     dimension_analysis_multi(), which instead compares several values of one
-    dimension side by side as separate cohorts. `filters` is
-    {field_key: [values]}; every field_key must be an active, pilot-flagged
-    dimension (validated here via resolve_dimension_field, same privacy gate
-    as the rest of lot 5) - no field name is ever hardcoded. An empty
-    `filters` dict returns the whole session's analysis, unrestricted.
+    dimension side by side as separate cohorts (and keeps its own
+    MIN_COHORT_N suppression, untouched). `filters` is {field_key: [values]};
+    every field_key must be an active, pilot-flagged dimension (validated
+    here via resolve_dimension_field, same privacy gate as the rest of lot
+    5) - no field name is ever hardcoded. An empty `filters` dict returns the
+    whole session's analysis, unrestricted.
 
     Recomputes directly from individual responses (analysis_for), never a
-    mean-of-means - a cohort of N=1 still yields a real capacity with
-    consensus reported as "single_respondent"; N=0 yields an all-None result
-    (participantCount/completedCount at 0), and the caller must render that
-    as an explicit "aucun participant" message rather than blank zeros.
+    mean-of-means. Per consigne's explicit N rules for this combined-filter
+    engine: N=0 yields an all-None result (participantCount/completedCount at
+    0, caller renders an explicit "aucun participant" message rather than
+    blank zeros) ; N=1 yields a real capacity with consensus reported as
+    "single_respondent" (rendered "Non calculable") ; N>=2 is a normal
+    calculation - no small-cohort suppression at this layer.
     """
     fields = {field_key: resolve_dimension_field(db, session_id, field_key) for field_key in filters}
     matches = participants_matching_filters(db, session_id, filters)
     result = analysis_for(db, [session_id], participant_ids=matches)
     if result is None:
         return None
-    suppressed = result["completedCount"] < min_n
-    if suppressed:
-        _suppress_small_cohort(result)
-    result["filters"] = {"applied": [{"fieldKey": k, "fieldLabel": fields[k]["label"], "values": v} for k, v in filters.items()], "minRequired": min_n, "suppressed": suppressed}
+    result["filters"] = {"applied": [{"fieldKey": k, "fieldLabel": fields[k]["label"], "values": v} for k, v in filters.items()]}
     result["findings"] = objective_findings(result)
     return result

@@ -1270,7 +1270,6 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result['completedCount'],5)
         self.assertEqual(result['domains'][0]['capacity'],100)
         self.assertEqual(result['filters']['applied'],[{'fieldKey':'genre','fieldLabel':'Genre','values':['F']},{'fieldKey':'langues','fieldLabel':'Langues','values':['fr']}])
-        self.assertFalse(result['filters']['suppressed'])
 
     def test_filtered_analysis_or_within_one_filter_and_across_filters(self):
         # genre in [F,M] (matches everyone) AND langues=fr (only fr speakers):
@@ -1291,7 +1290,24 @@ class EngineTests(unittest.TestCase):
         sid='sess-filters-none'; self._mk_combined_filter_session(sid)
         result=app.filtered_analysis(self.db,sid,{'genre':['Autre']})
         self.assertEqual(result['completedCount'],0)
-        self.assertTrue(result['filters']['suppressed'])
+        self.assertIsNone(result['global']['capacity'])
+
+    def test_filtered_analysis_n1_yields_real_capacity_with_non_calculable_consensus(self):
+        # Regle explicite de consignes_claude.txt (section 5) pour ce moteur de
+        # filtres combines : N=1 => capacite reelle, consensus "Non calculable"
+        # (pas de suppression avant N=5 comme sur l'ecran de comparaison a une
+        # seule dimension, qui garde son propre MIN_COHORT_N).
+        sid='sess-filters-n1'
+        schema_id,fields=self._mk_schema_with_fields()
+        app.update_profile_field(self.db,fields['genre'],{'isDimension':True})
+        t=self._mk_session(sid,profile_schema_id=schema_id)
+        self._add_participant(sid,'p-solo',t,value=4,n=1)
+        app.set_participant_profile_values(self.db,'p-solo',{'genre':'F'})
+        self.db.commit()
+        result=app.filtered_analysis(self.db,sid,{'genre':['F']})
+        self.assertEqual(result['completedCount'],1)
+        self.assertEqual(result['domains'][0]['capacity'],80)
+        self.assertEqual(result['domains'][0]['consensusNote'],'single_respondent')
 
     def test_filtered_analysis_refuses_unflagged_dimension(self):
         sid='sess-filters-refuse'; self._mk_session(sid,profile_schema_id=self._mk_schema_with_fields()[0])
@@ -1413,12 +1429,120 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(result['domains'][0]['indicators'][0]['gradedCapacity'])
         self.assertIsNone(result['domains'][0]['indicators'][0]['gradedConsensus'])
 
-    def test_filtered_analysis_suppressed_cohort_has_no_findings(self):
-        sid='sess-find-suppressed'; self._mk_dimension_session(sid,n_f=2,n_m=8)
+    def test_filtered_analysis_small_cohort_is_not_suppressed_from_n2_upward(self):
+        # Contrairement a l'ecran de comparaison a une seule dimension (qui
+        # garde sa propre suppression MIN_COHORT_N), le moteur de filtres
+        # combines calcule normalement des N>=2 (regle explicite de
+        # consignes_claude.txt, section 5).
+        sid='sess-find-small-cohort'; self._mk_dimension_session(sid,n_f=2,n_m=8)
         result=app.filtered_analysis(self.db,sid,{'genre':['F']})
-        self.assertTrue(result['filters']['suppressed'])
-        self.assertEqual(result['findings']['forces']['domains'],[])
-        self.assertEqual(result['findings']['fragilites']['domains'],[])
+        self.assertEqual(result['completedCount'],2)
+        self.assertIsNotNone(result['domains'][0]['capacity'])
+
+    # --- Mission parite :8810->:8820 (consignes_claude.txt section 14) : test
+    # de parite EPC prescrit - profil EPC par defaut + scenario Hommes/Femmes/
+    # Tous avec valeurs et resultats attendus exacts ---
+
+    def test_parity_scenario_hommes_femmes_tous(self):
+        t=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        sid=app.create_session(self.db,'owner-parity',{'templateId':t,'name':'Atelier parite EPC'})
+        schema_id=self.db.execute('select profile_schema_id from sessions where id=?',(sid,)).fetchone()['profile_schema_id']
+        self.assertIsNotNone(schema_id)
+        dims=app.available_dimensions(self.db,sid)
+        self.assertEqual(len(dims),5)
+        # "modifiables" : un champ par defaut se modifie comme n'importe quel
+        # champ de profil ordinaire (deja verifie en detail au point 5/13 ;
+        # ici on verifie juste que le scenario de recette ne heurte rien).
+        tid=self.db.execute('select template_id from sessions where id=?',(sid,)).fetchone()['template_id']
+        def add(pid,value,sexe):
+            self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,pid,'completed',app.now(),app.now(),None))
+            for iid in self._indicator_ids(tid):
+                self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,iid,str(value),'numeric',app.now(),app.now()))
+            app.set_participant_profile_values(self.db,pid,{'sexe':sexe})
+        for i,v in enumerate([5,5,4,4]): add(f'h{i}',v,'Homme')
+        for i,v in enumerate([1,1,2,2]): add(f'f{i}',v,'Femme')
+        self.db.commit()
+
+        whole=app.analysis(self.db,sid)
+        self.assertEqual(whole['completedCount'],8)
+        self.assertEqual(whole['global']['capacity'],60)
+
+        hommes=app.filtered_analysis(self.db,sid,{'sexe':['Homme']})
+        self.assertEqual(hommes['completedCount'],4)
+        self.assertEqual(hommes['global']['capacity'],90)
+        self.assertAlmostEqual(hommes['global']['consensus'],71.13,places=1)
+        self.assertEqual(hommes['global']['gradedCapacity'],85)
+        self.assertEqual(hommes['global']['gradedConsensus'],50)
+
+        femmes=app.filtered_analysis(self.db,sid,{'sexe':['Femme']})
+        self.assertEqual(femmes['completedCount'],4)
+        self.assertEqual(femmes['global']['capacity'],30)
+        self.assertAlmostEqual(femmes['global']['consensus'],71.13,places=1)
+        self.assertEqual(femmes['global']['gradedCapacity'],10)
+        self.assertEqual(femmes['global']['gradedConsensus'],50)
+
+        # "consensus recalcule sur les reponses individuelles" : jamais une
+        # moyenne des deux consensus de sous-groupes (qui vaudrait ~71.1 aussi
+        # et masquerait une vraie recomputation).
+        self.assertNotAlmostEqual(whole['global']['consensus'],71.13,places=1)
+
+        # Filtre combine : Sexe + Profil + Age (les 3 dimensions du modele par
+        # defaut) - aucun participant ne porte encore Profil/Age ici, donc le
+        # filtre combine doit legitimement retourner N=0, pas une erreur.
+        combined=app.filtered_analysis(self.db,sid,{'sexe':['Homme'],'profil':['ONG'],'tranche-dage':['18–24']})
+        self.assertEqual(combined['completedCount'],0)
+        self.assertIsNone(combined['global']['capacity'])
+
+    # --- Mission parite :8810->:8820 (consignes_claude.txt section 15) : test
+    # de modularite - un champ Region cree via le moteur generique doit se
+    # comporter EXACTEMENT comme un champ EPC par defaut, sans aucun code
+    # specifique a "Region" nulle part dans le moteur ---
+
+    def test_modularity_custom_region_field_behaves_like_any_dimension(self):
+        t=self.db.execute("select id from templates where name='EPC / SENEVAL'").fetchone()['id']
+        sid=app.create_session(self.db,'owner-region',{'templateId':t,'name':'Atelier Région'})
+        schema_id=self.db.execute('select profile_schema_id from sessions where id=?',(sid,)).fetchone()['profile_schema_id']
+        app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Région','options':['Dakar','Thiès','Saint-Louis'],'isDimension':True})
+        self.db.commit()
+
+        # Filtre : disponible au meme titre que les 5 dimensions EPC par defaut.
+        dims=app.available_dimensions(self.db,sid)
+        self.assertEqual(len(dims),6)
+        region_key=next(d['fieldKey'] for d in dims if d['label']=='Région')
+
+        tid=self.db.execute('select template_id from sessions where id=?',(sid,)).fetchone()['template_id']
+        def add(pid,value,region):
+            self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,pid,'completed',app.now(),app.now(),None))
+            for iid in self._indicator_ids(tid):
+                self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,iid,str(value),'numeric',app.now(),app.now()))
+            app.set_participant_profile_values(self.db,pid,{region_key:region})
+        for i,v in enumerate([5,5,5]): add(f'dk{i}',v,'Dakar')
+        for i,v in enumerate([1,1,1]): add(f'th{i}',v,'Thiès')
+        self.db.commit()
+
+        # Filtre (une seule valeur, via le moteur combinable).
+        dakar=app.filtered_analysis(self.db,sid,{region_key:['Dakar']})
+        self.assertEqual(dakar['completedCount'],3)
+        self.assertEqual(dakar['global']['capacity'],100)
+
+        # Comparaison (plusieurs valeurs de la meme dimension, ecran existant) :
+        # cet ecran garde son propre seuil MIN_COHORT_N (3 < 5 ici), donc les
+        # nombres sont masques - c'est le comportement generique attendu pour
+        # N'IMPORTE QUELLE dimension, pas une specificite de Région.
+        comparison=app.dimension_analysis_multi(self.db,sid,region_key,['Dakar','Thiès'])
+        self.assertEqual([r['dimension']['value'] for r in comparison],['Dakar','Thiès'])
+        self.assertEqual(comparison[0]['completedCount'],3)
+        self.assertTrue(comparison[0]['dimension']['suppressed'])
+
+        # Export filtre : ne plante pas et reflete le filtre applique.
+        header,domain_rows,_=app.filtered_analysis_rows(self.db,sid,{region_key:['Dakar']})
+        filt_desc=[h[1] for h in header if h[0]=='Filtres actifs'][0]
+        self.assertIn('Région',filt_desc)
+        self.assertEqual(domain_rows[0][1],100)
+
+        # Rapport : la repartition par region apparait dans le profil agrege.
+        breakdown=app.report_data(self.db,sid)['profile']
+        self.assertIn(['Région','Dakar',3],breakdown)
 
     # --- Lot 7 (modularisation, AUDIT_MODULARISATION_8800.md) : migration V1
     # (analysis_notes/recommendations) -> V2 (analysis_entries/

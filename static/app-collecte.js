@@ -147,8 +147,7 @@ async function runCombinedFilter(sessionId){
   let box=document.querySelector('#combined-filter-result');
   if(!result.completedCount){box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = 0</p><p class="muted">Pas de répondant correspondant à ces critères.</p>`;return}
   box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = ${result.completedCount}</p>`
-    +(result.filters.suppressed?`<p class="muted small">⚠ Effectif insuffisant (moins de ${result.filters.minRequired} participants validés) pour préserver l’anonymat. Résultats masqués.</p>`
-      :`<div class="grid"><div class="metric"><span class="label">Capacité</span><b>${fmt(result.global.capacity)}</b></div><div class="metric"><span class="label">Consensus</span><b>${fmtConsensus(result.global)}</b></div><div class="metric"><span class="label">Capacité graduée</span><b>${fmt(result.global.gradedCapacity)}</b></div><div class="metric"><span class="label">Consensus gradué</span><b>${fmt(result.global.gradedConsensus)}</b></div></div>${bars(result.domains,'standard')}${bars(result.domains,'graded')}`)
+    +`<div class="grid"><div class="metric"><span class="label">Capacité</span><b>${fmt(result.global.capacity)}</b></div><div class="metric"><span class="label">Consensus</span><b>${fmtConsensus(result.global)}</b></div><div class="metric"><span class="label">Capacité graduée</span><b>${fmt(result.global.gradedCapacity)}</b></div><div class="metric"><span class="label">Consensus gradué</span><b>${fmt(result.global.gradedConsensus)}</b></div></div>${bars(result.domains,'standard')}${bars(result.domains,'graded')}`
     +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="downloadFilteredAnalysis('xlsx')">Exporter l’analyse filtrée (Excel)</button><button class="secondary" onclick="downloadFilteredAnalysis('csv')">Exporter l’analyse filtrée (CSV)</button></div>`;
 }
 async function downloadFilteredAnalysis(ext){
