@@ -19,14 +19,32 @@ import re
 from io import BytesIO
 
 from .db import MODEL_KEY_EPC_SENEVAL, rows, template_payload
+from .profile import participant_profile_breakdown
 from .scoring import analysis
+
+
+def findings_rows(findings: dict) -> list[list]:
+    """Flattens objective_findings() (epc/scoring.py) into plain rows for
+    XLSX/DOCX/report display - mission de parite :8810->:8820, cf.
+    consignes_claude.txt."""
+    out: list[list] = []
+    for d in findings["forces"]["domains"]: out.append(["Force", "Domaine", d["label"], d["capacity"], d["consensus"]])
+    for i in findings["forces"]["indicators"]: out.append(["Force", "Indicateur", f"{i['domain']} — {i['label']}", i["capacity"], i["consensus"]])
+    for d in findings["fragilites"]["domains"]: out.append(["Fragilité", "Domaine", d["label"], d["capacity"], d["consensus"]])
+    for i in findings["fragilites"]["indicators"]: out.append(["Fragilité", "Indicateur", f"{i['domain']} — {i['label']}", i["capacity"], i["consensus"]])
+    for v in findings["vigilance"]:
+        if v["reason"] == "ecart_sous_populations":
+            out.append(["Vigilance", "Écart entre sous-populations", v["label"], v.get("gap"), ""])
+        else:
+            out.append(["Vigilance", "Domaine", v["label"], v.get("capacity"), v.get("consensus")])
+    return out
 
 # Ordre et cles des feuilles du classeur XLSX (report_xlsx) - identique a
 # l'ordre historique des onglets, jamais reordonne ni omis pour epc_seneval.
 REPORT_SECTIONS_EPC_SENEVAL = [
-    "synthese", "domaines", "indicateurs", "priorites", "analyses", "causes",
-    "consequences", "leviers", "recommandations", "formations", "plan_action",
-    "questionnaire",
+    "synthese", "profil_participants", "domaines", "indicateurs", "constats",
+    "priorites", "analyses", "causes", "consequences", "leviers",
+    "recommandations", "formations", "plan_action", "questionnaire",
 ]
 
 AI_SYSTEM_PROMPT_EPC_SENEVAL = (
@@ -125,7 +143,7 @@ def report_rows(db, sid):
 def report_xlsx(db,sid):
     a,rs=report_rows(db,sid); q=qualitative_data(db,sid); meta=report_data(db,sid)["meta"]; template=template_payload(db,a['session']['template_id']); manifest=restitution_manifest(template); out=BytesIO(); wb=xlsxwriter.Workbook(out,{"in_memory":True}); h=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"})
     analyses={x['priority_id']:x for x in q['analyses']}; priority_rows=[[p['id'],p['domain_label'],p['indicator_code'],p['indicator_label'],analyses.get(p['id'],{}).get('problem','')] for p in q['priorities']]
-    sheets=[("synthese","Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("domaines","Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("indicateurs","Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("priorites","Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("analyses","Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("causes","Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("consequences","Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("leviers","Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("recommandations","Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("formations","Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("plan_action","Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("questionnaire","Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
+    sheets=[("synthese","Synthèse",["Atelier","Organisation","Lieu","Date","Animateur","Public","Contexte","Conclusion","Capacité","Consensus"],[[a['session']['name'],a['session']['organization'],a['session']['location'],a['session']['date'],meta['facilitator'],meta['audience'],meta['context'],meta['conclusion'],a['global']['capacity'],_c(a['global'])]]),("profil_participants","Profil_participants",["Champ","Valeur","N"],participant_profile_breakdown(db,sid)),("domaines","Domaines",["Domaine","Capacité","Consensus","Cap. graduée","Cons. gradué","Réponses"],rs),("indicateurs","Indicateurs",["Domaine","Référence","Capacité","Consensus","Réponses","Manquants"],[[d['label'],i['label'],i['capacity'],_c(i),i['responses'],i['missing']] for d in a['domains'] for i in d['indicators']]),("constats","Constats",["Type","Niveau","Libellé","Capacité","Consensus"],findings_rows(a['findings'])),("priorites","Priorités",["ID priorité","Domaine","Référence","Indicateur","Constat"],priority_rows),("analyses","Analyses",["ID","Priorité","Constat"],[[x['id'],x['priority_id'],x['problem']] for x in q['analyses']]),("causes","Causes",["ID","Priorité","Parent","Cause","Type","Statut"],[[x['id'],x['priority_id'],x['parent_id'],x['content'],x['item_type'],x['validation_status']] for x in q['entries'] if x['kind']=='cause']),("consequences","Conséquences",["ID","Priorité","Conséquence","Statut"],[[x['id'],x['priority_id'],x['content'],x['validation_status']] for x in q['entries'] if x['kind']=='consequence']),("leviers","Leviers",["ID","Priorité","Levier","Commentaire","Statut"],[[x['id'],x['priority_id'],x['content'],x['comment'],x['validation_status']] for x in q['entries'] if x['kind']=='lever']),("recommandations","Recommandations",["ID","Priorité","Cause","Levier","Titre","Description","Catégorie","Niveau","Responsable","Échéance","Statut"],[[x['id'],x['priority_id'],x['cause_id'],x['lever_id'],x['title'],x['description'],x['category'],x['priority_level'],x['owner'],x['horizon'],x['status']] for x in q['recommendations']]),("formations","Formations",["ID","Priorité","Recommandation","Intitulé","Besoin","Public","Niveau","Commentaire"],[[x['id'],x['priority_id'],x['recommendation_id'],x['title'],x['need_text'],x['target_audience'],x['priority_level'],x['comment']] for x in q['trainingTopics']]),("plan_action","Plan_action",["N°","Action / recommandation","Origine","Responsable","Échéance","Priorité","Statut"],[[n+1,x['title'],x['priority_id'] or '—',x['owner'] or '—',x['horizon'] or '—',x['priority_level'],x['status']] for n,x in enumerate(q['recommendations']) if x['status']=='Retenue']),("questionnaire","Questionnaire",["Domaine","Référence","Indicateur","Échelle"],[[d['label'],i['label'],i['description'],f"{template['scale']['min']}–{template['scale']['max']}"] for d in template['domains'] for i in d['indicators'] if i['active']])]
     for key,name,head,data in sheets:
         if key not in manifest["reportSections"]: continue
         s=wb.add_worksheet(name);s.write_row(0,0,head,h);[s.write_row(n+1,0,row) for n,row in enumerate(data)];s.set_column(0,len(head)-1,24)
@@ -596,6 +614,32 @@ def report_docx(db, sid):
         ("Consensus gradué", pdf_fmt(g["gradedConsensus"])),
     ])
 
+    profile_breakdown = participant_profile_breakdown(db, sid)
+    if profile_breakdown:
+        docx_style_heading(doc.add_heading("Profil des participants", level=2))
+        pt = doc.add_table(rows=1, cols=3)
+        for c, x in zip(pt.rows[0].cells, ["Champ", "Valeur", "N"]):
+            c.text = x
+        for field, value, n in profile_breakdown:
+            row = pt.add_row().cells
+            for c, v in zip(row, [field, value, n]):
+                c.text = str(v)
+        docx_style_table(pt)
+
+    def add_findings_section():
+        rows_ = findings_rows(a["findings"])
+        if not rows_: return
+        docx_style_heading(doc.add_heading("Forces / Fragilités / Points de vigilance", level=2))
+        docx_note(doc, "Constats chiffrés issus des données ci-dessus — jamais présentés comme des causes.", italic=True)
+        ft = doc.add_table(rows=1, cols=5)
+        for c, x in zip(ft.rows[0].cells, ["Type", "Niveau", "Libellé", "Capacité", "Consensus"]):
+            c.text = x
+        for row_data in rows_:
+            row = ft.add_row().cells
+            for c, v in zip(row, row_data):
+                c.text = "" if v is None else str(v)
+        docx_style_table(ft)
+
     if not domains or PILImage is None:
         docx_style_heading(doc.add_heading("Synthèse par domaine", level=2))
         t = doc.add_table(rows=1, cols=6)
@@ -611,6 +655,7 @@ def report_docx(db, sid):
             doc.add_paragraph("Pas encore de données suffisantes pour la restitution graphique EPC.")
         elif PILImage is None:
             doc.add_paragraph("Graphiques indisponibles : le paquet optionnel Pillow n'est pas installé (voir README.md).")
+        add_findings_section()
         docx_style_heading(doc.add_heading("Priorités retenues", level=2))
         doc.add_paragraph(f"{len(priorities)} priorité(s) sélectionnée(s)." if priorities else "Aucune priorité sélectionnée.")
         out = BytesIO(); doc.save(out); return out.getvalue()
@@ -640,6 +685,7 @@ def report_docx(db, sid):
             c.text = str(v)
     docx_style_table(t)
 
+    add_findings_section()
     docx_style_heading(doc.add_heading("Priorités retenues", level=2))
     doc.add_paragraph(f"{len(priorities)} priorité(s) sélectionnée(s)." if priorities else "Aucune priorité sélectionnée.")
 
@@ -702,4 +748,4 @@ def report_data(db, session_id: str):
     if not a: return None
     meta=db.execute("SELECT * FROM session_report_meta WHERE session_id=?",(session_id,)).fetchone()
     template=template_payload(db,a["session"]["template_id"])
-    return {"analysis":a,"template":template,"qualitative":qualitative_data(db,session_id),"meta":dict(meta) if meta else {"facilitator":"","audience":"","context":"","conclusion":""},"manifest":restitution_manifest(template)}
+    return {"analysis":a,"template":template,"qualitative":qualitative_data(db,session_id),"meta":dict(meta) if meta else {"facilitator":"","audience":"","context":"","conclusion":""},"manifest":restitution_manifest(template),"profile":participant_profile_breakdown(db,session_id)}

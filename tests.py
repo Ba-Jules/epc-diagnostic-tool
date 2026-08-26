@@ -1528,7 +1528,7 @@ class EngineTests(unittest.TestCase):
     def test_restitution_manifest_lists_every_current_report_section_for_epc_seneval(self):
         manifest=app.restitution_manifest({'model_key':'epc_seneval'})
         self.assertEqual(manifest['modelKey'],'epc_seneval')
-        self.assertEqual(manifest['reportSections'],['synthese','domaines','indicateurs','priorites','analyses','causes','consequences','leviers','recommandations','formations','plan_action','questionnaire'])
+        self.assertEqual(manifest['reportSections'],['synthese','profil_participants','domaines','indicateurs','constats','priorites','analyses','causes','consequences','leviers','recommandations','formations','plan_action','questionnaire'])
         self.assertEqual(len(manifest['aiReportSections']),8)
         self.assertEqual(set(manifest['aiReportSections']),set(manifest['aiSectionLabels']))
         self.assertIn('EPC/SENEVAL',manifest['aiSystemPrompt'])
@@ -1545,6 +1545,38 @@ class EngineTests(unittest.TestCase):
         data=app.report_data(self.db,sid)
         self.assertEqual(data['manifest']['modelKey'],'epc_seneval')
         self.assertIn('domaines',data['manifest']['reportSections'])
+
+    # --- Mission parite :8810->:8820 (consignes_claude.txt) : profil des
+    # participants + constats automatiques dans le rapport final (JSON/XLSX/DOCX)
+    # - epc/profile.py participant_profile_breakdown(), epc/restitution.py
+    # findings_rows() ---
+
+    def test_report_data_includes_participant_profile_breakdown(self):
+        sid='sess-report-profile'
+        schema_id,fields=self._mk_schema_with_fields()
+        self._mk_session(sid,profile_schema_id=schema_id)
+        t=self.db.execute('select template_id from sessions where id=?',(sid,)).fetchone()['template_id']
+        self._add_participant(sid,'p1',t,value=5,n=1)
+        app.set_participant_profile_values(self.db,'p1',{'genre':'F'})
+        self.db.commit()
+        data=app.report_data(self.db,sid)
+        self.assertIn(['Genre','F',1],data['profile'])
+
+    def test_report_data_profile_empty_without_a_schema(self):
+        sid='sess-report-profile-none'; self._mk_session(sid)
+        self.assertEqual(app.report_data(self.db,sid)['profile'],[])
+
+    def test_report_xlsx_and_docx_include_profile_and_findings_sections(self):
+        sid='sess-report-findings'
+        schema_id,fields=self._mk_schema_with_fields()
+        self._mk_session(sid,profile_schema_id=schema_id)
+        self._add_domain_responses(sid,0,[5,5,5,5,5])
+        self.db.commit()
+        app.set_participant_profile_values(self.db,f'{sid}-d0-0',{'genre':'F'})
+        xlsx=app.report_xlsx(self.db,sid)
+        docx=app.report_docx(self.db,sid)
+        self.assertGreater(len(xlsx),1000)
+        self.assertGreater(len(docx),1000)
 
     def test_session_restitution_manifest_matches_restitution_manifest_for_the_sessions_template(self):
         sid='sess-restitution-manifest-2'; self._mk_session(sid)

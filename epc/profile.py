@@ -302,6 +302,35 @@ def participants_matching_dimension_values(db: sqlite3.Connection, session_id: s
     return result
 
 
+def participant_profile_breakdown(db: sqlite3.Connection, session_id: str) -> list[list]:
+    """Count of validated (completed) participants per profile value, for
+    every ACTIVE field of the session's attached profile schema (mission de
+    parite :8810->:8820, cf. consignes_claude.txt) - one [field_label, value,
+    n] row per (field, value) pair, blank/None values excluded (never
+    invented as a fake "non renseigne" row); a multi_choice value counts once
+    per selected option. Generic over whatever fields the pilot actually
+    configured for this session - no field name assumed, [] if the session
+    has no profile schema attached."""
+    schema_id = _session_profile_schema_id(db, session_id)
+    if not schema_id:
+        return []
+    fields = rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1 ORDER BY display_order", (schema_id,))
+    out: list[list] = []
+    for field in fields:
+        counts: dict[str, int] = {}
+        for r in db.execute("""SELECT v.value_json FROM participant_profile_values v
+                                JOIN participants p ON p.id=v.participant_id
+                                WHERE v.session_id=? AND v.field_id=? AND p.status='completed'""", (session_id, field["id"])):
+            stored = json.loads(r["value_json"])
+            for value in (stored if isinstance(stored, list) else [stored]):
+                if value in (None, ""):
+                    continue
+                counts[str(value)] = counts.get(str(value), 0) + 1
+        for value, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            out.append([field["label"], value, n])
+    return out
+
+
 def participants_matching_dimension(db: sqlite3.Connection, session_id: str, field_key: str, value) -> set[str]:
     """Participant ids of `session_id` whose profile value for `field_key`
     equals (single_choice) or contains (multi_choice) `value`. Caller must
