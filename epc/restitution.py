@@ -21,7 +21,7 @@ import re
 from io import BytesIO, StringIO
 
 from .db import MODEL_KEY_EPC_SENEVAL, rows, template_payload
-from .profile import get_participant_profile_values, participant_profile_breakdown
+from .profile import get_participant_profile_values, participant_profile_breakdown, resolve_session_profile_schema_id
 from .scoring import analysis, filtered_analysis
 
 
@@ -153,12 +153,16 @@ def report_rows(db, sid):
 # indicateur actif. Cloisonne a UNE session (donc a un groupe) : jamais de
 # donnee d'une autre session/campagne.
 def individual_responses_rows(db, session_id: str) -> dict:
-    session = db.execute("SELECT template_id, profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    session = db.execute("SELECT template_id FROM sessions WHERE id=?", (session_id,)).fetchone()
     if not session:
         return {"indicators": [], "profileFields": [], "rows": []}
     template = template_payload(db, session["template_id"])
     indicators = [i for d in template["domains"] for i in d["indicators"] if i["active"]]
-    profile_fields = rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1 ORDER BY display_order", (session["profile_schema_id"],)) if session["profile_schema_id"] else []
+    # Resolved via the campaign when this session belongs to one (correctifs
+    # cibles :8820) so the export includes every dimension shared across the
+    # campaign's groups, not just what happens to be recorded on this session.
+    schema_id = resolve_session_profile_schema_id(db, session_id)
+    profile_fields = rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1 ORDER BY display_order", (schema_id,)) if schema_id else []
     participants = rows(db, "SELECT * FROM participants WHERE session_id=? AND status='completed' ORDER BY started_at", (session_id,))
     out_rows = []
     for p in participants:

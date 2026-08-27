@@ -18,9 +18,9 @@ class EngineTests(unittest.TestCase):
         h,salt=app.hash_password('motdepasse123')
         self.db.execute('insert into users values(?,?,?,?,?,?,?)',(uid,email or f'{uid}@example.org',h,salt,role,uid,app.now()))
         return uid
-    def _mk_campaign(self,cid,owner_user_id,name='Campagne'):
+    def _mk_campaign(self,cid,owner_user_id,name='Campagne',profile_schema_id=None):
         t=self.db.execute('select id,version from templates').fetchone()
-        self.db.execute('insert into campaigns values(?,?,?,?,?,?,?,?,?,?,?)',(cid,owner_user_id,name,'',None,None,t['id'],t['version'],'active',app.now(),app.now()))
+        self.db.execute('insert into campaigns values(?,?,?,?,?,?,?,?,?,?,?,?)',(cid,owner_user_id,name,'',None,None,t['id'],t['version'],'active',app.now(),app.now(),profile_schema_id))
         return t['id']
     def _indicator_ids(self,template_id):
         return [r['id'] for r in self.db.execute("select i.id from indicators i join domains d on d.id=i.domain_id where d.template_id=? order by d.display_order,i.display_order",(template_id,))]
@@ -811,6 +811,95 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(app.update_session(self.db,'sess-upd',{'name':'Atelier renomme'}))
         self.assertEqual(self.db.execute('select name from sessions where id=?',('sess-upd',)).fetchone()['name'],'Atelier renomme')
 
+    # --- Correctifs cibles :8820 apres contre-recette Codex (consignes_claude.txt)
+    # PRIORITE CRITIQUE : propagation des dimensions personnalisees entre TOUS
+    # les groupes d'une meme campagne - epc/profile.py
+    # resolve_session_profile_schema_id(), campaigns.profile_schema_id ---
+
+    def _mk_campaign_with_two_groups(self,uid_suffix=''):
+        uid=self._mk_user('u-campaign-groups'+uid_suffix)
+        t=self.db.execute("select id,version from templates where name='EPC / SENEVAL'").fetchone()
+        cid=app.create_campaign(self.db,uid,t['id'],t['version'],{'name':'Campagne A/B'+uid_suffix})
+        camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        ga=app.create_group(self.db,camp,uid,{'name':'Groupe A'})
+        gb=app.create_group(self.db,camp,uid,{'name':'Groupe B'})
+        return uid,cid,ga['id'],gb['id']
+
+    def test_campaign_groups_share_the_same_profile_schema(self):
+        uid,cid,gaid,gbid=self._mk_campaign_with_two_groups()
+        schema_a=self.db.execute('select profile_schema_id from sessions where id=?',(gaid,)).fetchone()['profile_schema_id']
+        schema_b=self.db.execute('select profile_schema_id from sessions where id=?',(gbid,)).fetchone()['profile_schema_id']
+        campaign_schema=self.db.execute('select profile_schema_id from campaigns where id=?',(cid,)).fetchone()['profile_schema_id']
+        self.assertEqual(schema_a,schema_b)
+        self.assertEqual(schema_a,campaign_schema)
+
+    def test_new_dimension_added_via_one_group_is_immediately_available_to_the_other(self):
+        # Reproduit exactement le bug signale par la contre-recette Codex :
+        # une dimension "Région" ajoutée en passant par le profil resolu du
+        # groupe A doit être visible pour le groupe B, sans recreer les groupes.
+        uid,cid,gaid,gbid=self._mk_campaign_with_two_groups()
+        schema_id=app.resolve_session_profile_schema_id(self.db,gaid)
+        app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Région','options':['Dakar','Thiès'],'isDimension':True})
+        self.db.commit()
+        dims_a=app.available_dimensions(self.db,gaid)
+        dims_b=app.available_dimensions(self.db,gbid)
+        self.assertIn('Région',[d['label'] for d in dims_a])
+        self.assertIn('Région',[d['label'] for d in dims_b])
+        self.assertEqual(len(dims_a),len(dims_b))
+
+    def test_modifying_a_dimension_propagates_to_every_group(self):
+        uid,cid,gaid,gbid=self._mk_campaign_with_two_groups()
+        schema_id=app.resolve_session_profile_schema_id(self.db,gaid)
+        sexe_field=next(f for f in app.profile_schema_payload(self.db,schema_id)['fields'] if f['field_key']=='sexe')
+        app.update_profile_field(self.db,sexe_field['id'],{'label':'Genre'})
+        self.db.commit()
+        dims_b=app.available_dimensions(self.db,gbid)
+        self.assertIn('Genre',[d['label'] for d in dims_b])
+
+    def test_deactivating_a_dimension_from_group_b_removes_it_for_group_a_too(self):
+        uid,cid,gaid,gbid=self._mk_campaign_with_two_groups()
+        schema_id=app.resolve_session_profile_schema_id(self.db,gbid)
+        sexe_field=next(f for f in app.profile_schema_payload(self.db,schema_id)['fields'] if f['field_key']=='sexe')
+        app.update_profile_field(self.db,sexe_field['id'],{'active':False})
+        self.db.commit()
+        dims_a=app.available_dimensions(self.db,gaid)
+        self.assertNotIn('Sexe',[d['label'] for d in dims_a])
+
+    def test_filtered_analysis_scoped_per_group_after_shared_dimension_added(self):
+        # Le filtre/comparaison doit fonctionner sur chaque groupe (A puis B)
+        # avec la dimension partagee, sans jamais melanger leurs participants.
+        uid,cid,gaid,gbid=self._mk_campaign_with_two_groups()
+        schema_id=app.resolve_session_profile_schema_id(self.db,gaid)
+        app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Région','options':['Dakar','Thiès'],'isDimension':True})
+        self.db.commit()
+        tid=self.db.execute('select template_id from sessions where id=?',(gaid,)).fetchone()['template_id']
+        for i,v in enumerate([5,5,5]):
+            pid=f'{gaid}-p{i}'; self._add_participant(gaid,pid,tid,value=v,n=1)
+            app.set_participant_profile_values(self.db,pid,{'region':'Dakar'})
+        for i,v in enumerate([1,1,1]):
+            pid=f'{gbid}-p{i}'; self._add_participant(gbid,pid,tid,value=v,n=1)
+            app.set_participant_profile_values(self.db,pid,{'region':'Dakar'})
+        self.db.commit()
+        result_a=app.filtered_analysis(self.db,gaid,{'region':['Dakar']})
+        result_b=app.filtered_analysis(self.db,gbid,{'region':['Dakar']})
+        self.assertEqual(result_a['completedCount'],3)
+        self.assertEqual(result_a['domains'][0]['capacity'],100)
+        self.assertEqual(result_b['completedCount'],3)
+        self.assertEqual(result_b['domains'][0]['capacity'],20)
+
+    def test_standalone_session_profile_resolution_is_unaffected(self):
+        schema_id,fields=self._mk_schema_with_fields()
+        sid='sess-standalone-resolve'; self._mk_session(sid,profile_schema_id=schema_id)
+        self.assertEqual(app.resolve_session_profile_schema_id(self.db,sid),schema_id)
+
+    def test_detaching_profile_from_a_campaign_group_propagates_to_the_campaign(self):
+        uid,cid,gaid,gbid=self._mk_campaign_with_two_groups()
+        app.update_session(self.db,gaid,{'name':'Groupe A','profileSchemaId':None})
+        self.db.commit()
+        campaign_schema=self.db.execute('select profile_schema_id from campaigns where id=?',(cid,)).fetchone()['profile_schema_id']
+        self.assertIsNone(campaign_schema)
+        self.assertIsNone(app.resolve_session_profile_schema_id(self.db,gbid))
+
     # --- Lot 2a (modularisation, AUDIT_MODULARISATION_8800.md) : identite canonique stable ---
     # Colonnes additives (model_key/is_canonical) sur templates, encore inertes : rien ne
     # les lit ailleurs dans le moteur a ce stade, seule leur coherence est testee ici.
@@ -1057,7 +1146,7 @@ class EngineTests(unittest.TestCase):
         # per-participant details - confirmed by inspecting its actual key set.
         schema_id,fields=self._mk_schema_with_fields()
         cid='camp-relay-privacy'; uid=self._mk_user('u-relay-privacy')
-        self._mk_campaign(cid,uid)
+        self._mk_campaign(cid,uid,profile_schema_id=schema_id)
         sid='sess-relay-privacy'; self._mk_session(sid,campaign_id=cid,profile_schema_id=schema_id)
         self.db.execute("update sessions set relay_token_hash=? where id=?",(app.relay_token_hash('tok-privacy'),sid)); self.db.commit()
         pid=app.create_participant(self.db,sid,{})['id']

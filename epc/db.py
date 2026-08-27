@@ -161,6 +161,15 @@ def init_db(db: sqlite3.Connection) -> None:
     for col, decl in (("description", "TEXT"), ("expected_participants", "INTEGER"), ("owner_user_id", "TEXT"), ("campaign_id", "TEXT"), ("group_code", "TEXT"), ("group_color", "TEXT"), ("relay_name", "TEXT"), ("relay_token_hash", "TEXT"), ("profile_schema_id", "TEXT")):
         if col not in session_columns:
             db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+    campaign_columns = {r["name"] for r in db.execute("PRAGMA table_info(campaigns)")}
+    if "profile_schema_id" not in campaign_columns:
+        # Mission de correctifs cibles :8820 (cf. consignes_claude.txt) : la
+        # campagne devient la source de verite du profil pour TOUS ses groupes -
+        # avant cette colonne, chaque groupe recevait son propre schema cree
+        # independamment (ensure_default_profile_schema appele par groupe), ce
+        # qui faisait diverger silencieusement les dimensions entre groupes
+        # d'une meme campagne.
+        db.execute("ALTER TABLE campaigns ADD COLUMN profile_schema_id TEXT")
     template_columns = {r["name"] for r in db.execute("PRAGMA table_info(templates)")}
     if "owner_user_id" not in template_columns:
         db.execute("ALTER TABLE templates ADD COLUMN owner_user_id TEXT")

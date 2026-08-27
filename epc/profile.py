@@ -33,12 +33,37 @@ def _validate_choice_and_dimension(field_type: str, options: list, is_dimension:
         raise ValueError("Seuls les champs à choix unique ou multiple peuvent devenir une dimension d'analyse.")
 
 
-def _session_profile_schema_id(db: sqlite3.Connection, session_id: str) -> str | None:
+def resolve_session_profile_schema_id(db: sqlite3.Connection, session_id: str) -> str | None:
     """Shared by set_participant_profile_values()/available_dimensions()/
-    resolve_dimension_field(): the session's attached profile schema id, or
-    None if the session doesn't exist or has no profile attached."""
-    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-    return session["profile_schema_id"] if session else None
+    resolve_dimension_field()/participant_resume()/list_session_participants()/
+    individual_responses_rows(): the profile schema a session actually uses.
+
+    Correctifs cibles :8820 (cf. consignes_claude.txt) - PRIORITE CRITIQUE : for
+    a session that belongs to a campaign, the CAMPAIGN's own profile_schema_id
+    is always the source of truth, never the session's own column - each group
+    of a campaign used to get its default profile schema created independently
+    (one ensure_default_profile_schema() call per group), so a dimension added
+    to one group's schema silently never existed for sibling groups. Resolving
+    through the campaign here means every existing group becomes consistent
+    immediately, without rewriting any session row: campaigns.profile_schema_id
+    is now written by create_campaign()/create_group()/update_session() (see
+    epc/campaigns.py) so it stays the one shared schema for all of a
+    campaign's groups. A standalone (non-campaign) session keeps using its own
+    column, unaffected.
+
+    None if the session doesn't exist or has no profile attached (standalone)
+    resp. the campaign has none attached yet."""
+    session = db.execute("SELECT profile_schema_id, campaign_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if not session:
+        return None
+    if session["campaign_id"]:
+        # Absolute source of truth for a campaign session: even a detached
+        # (None) campaign schema must win over whatever this session's own
+        # column happens to still hold - otherwise a group created before a
+        # "retirer le profil" action would keep leaking its own stale value.
+        campaign = db.execute("SELECT profile_schema_id FROM campaigns WHERE id=?", (session["campaign_id"],)).fetchone()
+        return campaign["profile_schema_id"] if campaign else None
+    return session["profile_schema_id"]
 
 
 # Model-driven default profile schemas (mission de parite :8810->:8820, cf.
@@ -221,7 +246,7 @@ def set_participant_profile_values(db: sqlite3.Connection, participant_id: str, 
     if not participant:
         raise ValueError("Participant introuvable.")
     session_id = participant["session_id"]
-    schema_id = _session_profile_schema_id(db, session_id)
+    schema_id = resolve_session_profile_schema_id(db, session_id)
     if not schema_id:
         raise ValueError("Cet atelier n'a pas de profil participant configuré.")
     fields = {f["field_key"]: f for f in rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1", (schema_id,))}
@@ -257,7 +282,7 @@ def available_dimensions(db: sqlite3.Connection, session_id: str) -> list[dict]:
     AUDIT_MODULARISATION_8800.md) - empty list if the session has no profile
     schema, or if none of its fields are flagged. Powers the filter/comparison
     UI's "which dimension can I use" choices."""
-    schema_id = _session_profile_schema_id(db, session_id)
+    schema_id = resolve_session_profile_schema_id(db, session_id)
     if not schema_id:
         return []
     payload = profile_schema_payload(db, schema_id)
@@ -272,7 +297,7 @@ def resolve_dimension_field(db: sqlite3.Connection, session_id: str, field_key: 
     boundary the audit calls out for lot 5 - never resolve a dimension
     filter any other way (e.g. trusting a raw field_key from the client
     without this check would let anyone probe arbitrary profile values)."""
-    schema_id = _session_profile_schema_id(db, session_id)
+    schema_id = resolve_session_profile_schema_id(db, session_id)
     if not schema_id:
         raise ValueError("Cet atelier n'a pas de profil participant configuré.")
     field = db.execute("SELECT * FROM profile_fields WHERE schema_id=? AND field_key=? AND active=1", (schema_id, field_key)).fetchone()
@@ -311,7 +336,7 @@ def participant_profile_breakdown(db: sqlite3.Connection, session_id: str) -> li
     per selected option. Generic over whatever fields the pilot actually
     configured for this session - no field name assumed, [] if the session
     has no profile schema attached."""
-    schema_id = _session_profile_schema_id(db, session_id)
+    schema_id = resolve_session_profile_schema_id(db, session_id)
     if not schema_id:
         return []
     fields = rows(db, "SELECT * FROM profile_fields WHERE schema_id=? AND active=1 ORDER BY display_order", (schema_id,))

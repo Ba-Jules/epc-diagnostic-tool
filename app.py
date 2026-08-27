@@ -77,6 +77,7 @@ from epc.profile import (
     create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
     create_profile_field, update_profile_field, delete_profile_field,
     set_participant_profile_values, get_participant_profile_values, available_dimensions,
+    resolve_session_profile_schema_id,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -387,8 +388,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json(200, rows(db, "SELECT id,name,description,owner_user_id,created_at,updated_at FROM profile_schemas WHERE owner_user_id IS NULL OR owner_user_id=? ORDER BY name", (user["id"],)))
             if path.startswith("/api/profile-schemas/"): return self.json(200, profile_schema_payload(db, path.rsplit("/", 1)[1]) or {"error": "Profil introuvable"})
             if path == "/api/sessions":
-                if user["role"] == "admin": return self.json(200, rows(db, "SELECT * FROM sessions ORDER BY created_at DESC"))
-                return self.json(200, rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],)))
+                sessions = rows(db, "SELECT * FROM sessions ORDER BY created_at DESC") if user["role"] == "admin" else rows(db, "SELECT * FROM sessions WHERE owner_user_id=? ORDER BY created_at DESC", (user["id"],))
+                # profile_schema_id resolved via the campaign for group sessions
+                # (correctifs cibles :8820) - every frontend consumer of this list
+                # (Configuration's "profil actif" card and its edit actions,
+                # participants roster, etc.) must act on the campaign's shared
+                # schema, never a possibly-stale value recorded on this one group.
+                for s in sessions:
+                    s["profile_schema_id"] = resolve_session_profile_schema_id(db, s["id"])
+                return self.json(200, sessions)
             if path.startswith("/api/sessions/") and path.endswith("/participants"):
                 return self.json(200, list_session_participants(db, path.split("/")[3]))
             if path.startswith("/api/sessions/") and path.endswith("/dimensions"):

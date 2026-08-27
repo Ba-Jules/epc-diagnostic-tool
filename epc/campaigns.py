@@ -150,8 +150,14 @@ def campaign_kits_zip(db: sqlite3.Connection, campaign_id: str, base_url: str) -
 
 def create_campaign(db: sqlite3.Connection, owner_user_id: str, template_id: str, template_version: int, data: dict) -> str:
     cid, stamp = str(uuid.uuid4()), now()
-    db.execute("INSERT INTO campaigns VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (cid, owner_user_id, data["name"], data.get("description", ""), data.get("periodStart"), data.get("periodEnd"), template_id, template_version, "active", stamp, stamp))
+    # The campaign's own default profile schema (correctifs cibles :8820, cf.
+    # consignes_claude.txt) - created ONCE here and shared by every group of
+    # this campaign (see create_group()), so a dimension is never created
+    # independently per group in the first place.
+    template = template_payload(db, template_id)
+    profile_schema_id = ensure_default_profile_schema(db, owner_user_id, template.get("model_key")) if template else None
+    db.execute("INSERT INTO campaigns VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (cid, owner_user_id, data["name"], data.get("description", ""), data.get("periodStart"), data.get("periodEnd"), template_id, template_version, "active", stamp, stamp, profile_schema_id))
     db.commit()
     return cid
 
@@ -170,11 +176,19 @@ def create_group(db: sqlite3.Connection, campaign, owner_user_id: str, data: dic
     raw_token = secrets.token_urlsafe(24)
     profile_schema_id = data.get("profileSchemaId")
     if profile_schema_id is None:
-        template = template_payload(db, campaign["template_id"])
-        # The template's OWN model_key (never the restitution fallback that
-        # treats every untagged/custom questionnaire as EPC/SENEVAL for report
-        # purposes) - a default profile is only a fit for the genuine model.
-        profile_schema_id = ensure_default_profile_schema(db, owner_user_id, template.get("model_key"))
+        # The CAMPAIGN's own schema is the one source of truth for every group
+        # (correctifs cibles :8820, PRIORITE CRITIQUE) - never create a fresh
+        # default schema per group, or a dimension added to one group would
+        # silently never exist for its siblings. A campaign created before
+        # this fix (or whose template had no default profile) may still have
+        # none yet: create it once here AND persist it on the campaign so
+        # every subsequent group in this campaign reuses the exact same row.
+        profile_schema_id = campaign["profile_schema_id"]
+        if profile_schema_id is None:
+            template = template_payload(db, campaign["template_id"])
+            profile_schema_id = ensure_default_profile_schema(db, owner_user_id, template.get("model_key"))
+            if profile_schema_id:
+                db.execute("UPDATE campaigns SET profile_schema_id=? WHERE id=?", (profile_schema_id, campaign["id"]))
     db.execute("INSERT INTO sessions (id,template_id,template_version,name,organization,location,date,status,created_at,closed_at,description,expected_participants,owner_user_id,campaign_id,group_code,group_color,relay_name,relay_token_hash,profile_schema_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, campaign["template_id"], campaign["template_version"], data["name"], "", "", "", "open", now(), None, "",
          int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None,
@@ -219,11 +233,11 @@ def update_session(db: sqlite3.Connection, session_id: str, data: dict) -> bool:
     # a caller that omits it entirely must not silently wipe a value set elsewhere
     # (e.g. by create_group/create_session) - only an explicit key (including an
     # explicit null, to clear it) changes it.
+    existing_session = db.execute("SELECT profile_schema_id, campaign_id FROM sessions WHERE id=?", (session_id,)).fetchone()
     if "profileSchemaId" in data:
         profile_schema_id = data["profileSchemaId"]
     else:
-        current = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-        profile_schema_id = current["profile_schema_id"] if current else None
+        profile_schema_id = existing_session["profile_schema_id"] if existing_session else None
     if data.get("templateId"):
         tpl = db.execute("SELECT version FROM templates WHERE id=?", (data["templateId"],)).fetchone()
         if not tpl:
@@ -233,5 +247,12 @@ def update_session(db: sqlite3.Connection, session_id: str, data: dict) -> bool:
     else:
         db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=?,profile_schema_id=? WHERE id=?",
             (data["name"], data.get("organization", ''), data.get("location", ''), data.get("date", ''), data.get("description", ''), expected, profile_schema_id, session_id))
+    # A profile attached/detached from a campaign group must propagate to the
+    # whole campaign (correctifs cibles :8820) - the campaign stays the one
+    # source of truth every group resolves through (resolve_session_profile_
+    # schema_id, epc/profile.py), so writing it here is what makes an edit
+    # made from any single group's Configuration screen visible to its siblings.
+    if "profileSchemaId" in data and existing_session and existing_session["campaign_id"]:
+        db.execute("UPDATE campaigns SET profile_schema_id=? WHERE id=?", (profile_schema_id, existing_session["campaign_id"]))
     db.commit()
     return True

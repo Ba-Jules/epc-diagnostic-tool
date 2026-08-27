@@ -11,7 +11,7 @@ import sqlite3
 import uuid
 
 from .db import now, rows, template_payload
-from .profile import get_participant_profile_values, profile_schema_payload
+from .profile import get_participant_profile_values, profile_schema_payload, resolve_session_profile_schema_id
 
 
 class CollecteClosedError(Exception):
@@ -52,7 +52,10 @@ def participant_resume(db: sqlite3.Connection, session_id: str, participant_id: 
     # profile/profileValues are additive (lot 4a): a session without profile_schema_id
     # (the default, unchanged for every pre-existing session) yields None/{} exactly
     # as if these two keys didn't exist, so older clients ignoring them are unaffected.
-    schema_id = session["profile_schema_id"] if session else None
+    # Resolved via the campaign when this session belongs to one (correctifs
+    # cibles :8820) so a participant in ANY group sees the campaign's shared
+    # profile fields, not a possibly-stale schema recorded on this one session.
+    schema_id = resolve_session_profile_schema_id(db, session_id) if session else None
     return {
         "session": dict(session) if session else None,
         "participant": dict(participant) if participant else None,
@@ -72,8 +75,7 @@ def list_session_participants(db: sqlite3.Connection, session_id: str) -> list[d
     participant (an N+1 query pattern flagged by the ultrareview) - the
     roster page's query count no longer grows with the number of
     participants."""
-    session = db.execute("SELECT profile_schema_id FROM sessions WHERE id=?", (session_id,)).fetchone()
-    schema_id = session["profile_schema_id"] if session else None
+    schema_id = resolve_session_profile_schema_id(db, session_id)
     participants = rows(db, "SELECT * FROM participants WHERE session_id=? ORDER BY started_at", (session_id,))
     values_by_participant: dict[str, dict] = {}
     if schema_id:
