@@ -1156,6 +1156,48 @@ class EngineTests(unittest.TestCase):
         relay_keys={'campaignName','groupName','relayName','groupCode','groupColor','expectedParticipants','participantCount','completedCount','participantLink'}
         self.assertNotIn('profile',relay_keys); self.assertNotIn('profileValues',relay_keys)
 
+    def test_relay_view_stays_scoped_to_its_own_group_with_shared_dimension(self):
+        # Verification de non-regression demandee par consignes_claude.txt
+        # (correctifs cibles :8820, point 8) : apres le partage du schema de
+        # profil au niveau campagne (point 1), le relais d'un groupe doit
+        # rester strictement scope a ce groupe - bon groupe, bonne dimension
+        # partagee, aucun acces aux compteurs/donnees de l'autre groupe.
+        uid=self._mk_user('u-relay-scope')
+        t=self.db.execute("select id,version from templates where name='EPC / SENEVAL'").fetchone()
+        cid=app.create_campaign(self.db,uid,t['id'],t['version'],{'name':'Campagne Relais'})
+        camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        ga=app.create_group(self.db,camp,uid,{'name':'Groupe A'})
+        gb=app.create_group(self.db,camp,uid,{'name':'Groupe B'})
+        schema_id=app.resolve_session_profile_schema_id(self.db,ga['id'])
+        app.create_profile_field(self.db,schema_id,{'fieldType':'single_choice','label':'Région','options':['Dakar','Thiès'],'isDimension':True})
+        self.db.commit()
+        tid=self.db.execute('select template_id from sessions where id=?',(ga['id'],)).fetchone()['template_id']
+        for i in range(3):
+            pid=f'{ga["id"]}-p{i}'; self._add_participant(ga['id'],pid,tid,value=5,n=1)
+            app.set_participant_profile_values(self.db,pid,{'region':'Dakar'})
+        for i in range(2):
+            pid=f'{gb["id"]}-p{i}'; self._add_participant(gb['id'],pid,tid,value=1,n=1,status='completed' if i==0 else 'in_progress')
+            app.set_participant_profile_values(self.db,pid,{'region':'Thiès'})
+        self.db.commit()
+
+        # Reproduit la requete du relais public (GET /api/relay/{token}).
+        row=self.db.execute("SELECT s.*, c.name AS campaign_name FROM sessions s LEFT JOIN campaigns c ON c.id=s.campaign_id WHERE s.relay_token_hash=?",(app.relay_token_hash(ga['relayToken']),)).fetchone()
+        self.assertEqual(row['id'],ga['id'])  # bon groupe
+        self.assertEqual(row['group_code'],ga['groupCode'])
+        pc=self.db.execute("SELECT COUNT(*) FROM participants WHERE session_id=?",(row['id'],)).fetchone()[0]
+        cc=self.db.execute("SELECT COUNT(*) FROM participants WHERE session_id=? AND status='completed'",(row['id'],)).fetchone()[0]
+        self.assertEqual(pc,3); self.assertEqual(cc,3)  # compteurs corrects, scoped au groupe A
+
+        dims_a=app.available_dimensions(self.db,ga['id']); dims_b=app.available_dimensions(self.db,gb['id'])
+        self.assertIn('Région',[d['label'] for d in dims_a])
+        self.assertIn('Région',[d['label'] for d in dims_b])  # bonne dimension, partagee par la campagne
+
+        row_b=self.db.execute("SELECT s.* FROM sessions s WHERE s.relay_token_hash=?",(app.relay_token_hash(gb['relayToken']),)).fetchone()
+        self.assertNotEqual(row_b['id'],row['id'])  # aucun acces aux autres groupes via ce token
+        pc_b=self.db.execute("SELECT COUNT(*) FROM participants WHERE session_id=?",(row_b['id'],)).fetchone()[0]
+        cc_b=self.db.execute("SELECT COUNT(*) FROM participants WHERE session_id=? AND status='completed'",(row_b['id'],)).fetchone()[0]
+        self.assertEqual(pc_b,2); self.assertEqual(cc_b,1)  # groupe B garde ses propres compteurs, non melanges
+
     def test_session_delete_cascade_removes_participant_profile_values(self):
         # Reproduces a real bug caught manually while testing lot 4a: deleting a
         # session/group/campaign cascades through SESSION_CHILD_TABLES, and
