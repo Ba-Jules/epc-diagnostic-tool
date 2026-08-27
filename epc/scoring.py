@@ -27,6 +27,16 @@ from .profile import participants_matching_dimension_values, participants_matchi
 # low-confidence.
 MIN_COHORT_N = 5
 
+
+def resolve_min_cohort_n(db, session_id: str) -> int:
+    """The effective confidentiality threshold for this session's comparisons
+    (correctifs cibles :8820, cf. consignes_claude.txt point 6) - the pilot's
+    own sessions.min_cohort_n if set, else the conservative MIN_COHORT_N
+    default. Never removes the protection: a caller that can't resolve a
+    session still gets the safe default, not an unprotected 0."""
+    session = db.execute("SELECT min_cohort_n FROM sessions WHERE id=?", (session_id,)).fetchone()
+    return session["min_cohort_n"] if session and session["min_cohort_n"] else MIN_COHORT_N
+
 # Constats automatiques deterministes (mission de parite :8810->:8820, cf.
 # consignes_claude.txt) - mêmes seuils que la version de reference stable-simple :
 # FORCE_THRESHOLD s'aligne sur le plancher de la bande "Au-dessus de la moyenne",

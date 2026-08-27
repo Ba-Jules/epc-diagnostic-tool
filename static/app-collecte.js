@@ -73,7 +73,7 @@ function radar(ds){let a=ds.filter(d=>d.capacity!=null),n=a.length;if(n<3)return
 async function diagnostic(id){let a=await api('/api/sessions/'+id+'/analysis'),q=await api('/api/sessions/'+id+'/qualitative-data'),g=a.global;window.currentSessionId=id;shell('resultats','traiter',a.session.name,'Diagnostic du niveau de capacité');app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${id}')">← Retour à l’atelier</button><h2>Diagnostic terminé</h2><p class="muted">${esc(a.session.name)} · ${a.participantCount} commencés · ${a.completedCount} validés · taux de validation ${a.participantCount?Math.round(a.completedCount/a.participantCount*100):0}%</p><div class="grid"><div class="metric"><span class="label">Capacité</span><b>${fmt(g.capacity)}</b></div><div class="metric"><span class="label">Consensus</span><b>${fmtConsensus(g)}</b></div><div class="metric"><span class="label">Capacité graduée</span><b>${fmt(g.gradedCapacity)}</b></div><div class="metric"><span class="label">Consensus gradué</span><b>${fmt(g.gradedConsensus)}</b></div></div><div class="section-header" style="margin-top:1.6rem"><h3>Synthèse par domaine</h3></div><div class="table-wrap"><table><tr><th>Domaine</th><th>Capacité</th><th>Consensus</th><th>Graduées</th><th>Niveau</th><th>Réponses</th><th></th></tr>${a.domains.map(d=>`<tr><td>${esc(d.label)}</td><td>${fmt(d.capacity)}</td><td>${fmtConsensus(d)}</td><td>${d.gradedCapacity??'—'} / ${d.gradedConsensus??'—'}</td><td>${level(d.capacity)}</td><td>${d.responses}</td><td><button class="ghost" onclick="domainDiagnostic('${id}','${d.id}')">Détail</button></td></tr>`).join('')}</table></div><div class="section-header" style="margin-top:1.6rem"><h3>Priorités retenues</h3></div>${q.priorities.length?`<p>${q.priorities.length} priorité(s) sélectionnée(s).</p>`:'<p class="muted">Aucune priorité sélectionnée.</p>'}<p><button onclick="finalReport('${id}')">Synthèse finale</button></p></section>`}
 async function dimensionAnalysisView(sessionId){
   window.currentSessionId=sessionId;
-  let [dims,list]=await Promise.all([api('/api/sessions/'+sessionId+'/dimensions'),api('/api/sessions')]);
+  let [dims,list,threshold]=await Promise.all([api('/api/sessions/'+sessionId+'/dimensions'),api('/api/sessions'),api('/api/sessions/'+sessionId+'/min-cohort-n')]);
   let s=list.find(x=>x.id===sessionId);
   shell('resultats','traiter',s?s.name:'','Filtrer / comparer par profil');
   if(!dims.length){
@@ -81,7 +81,8 @@ async function dimensionAnalysisView(sessionId){
     return;
   }
   window.dimensionFields=dims;
-  app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${sessionId}')">← Retour à l’atelier</button><h2>Filtrer / comparer par profil</h2><p class="muted small">Compare les résultats du diagnostic entre sous-groupes de participants, selon un champ de profil marqué comme dimension. Les sous-groupes dont l’effectif est trop faible sont automatiquement masqués pour préserver l’anonymat (le seuil exact est rappelé après chaque comparaison).</p>
+  app.innerHTML=`<section class="card"><button class="ghost" onclick="moderator('${sessionId}')">← Retour à l’atelier</button><h2>Filtrer / comparer par profil</h2><p class="muted small">Compare les résultats du diagnostic entre sous-groupes de participants, selon un champ de profil marqué comme dimension. Les sous-groupes dont l’effectif est trop faible sont automatiquement masqués pour préserver l’anonymat.</p>
+  <p class="text-meta">Seuil de confidentialité actuel : <b id="cohort-threshold-value">${threshold.value}</b> participant(s) validé(s) minimum <span class="muted small">(valeur par défaut conservatrice : ${threshold.default})</span> — <input id="cohort-threshold-input" type="number" min="1" value="${threshold.value}" style="width:5rem"> <button type="button" class="secondary" onclick="saveCohortThreshold('${sessionId}')">Modifier le seuil</button></p>
   <label>Dimension<select id="dim-select" onchange="renderDimensionOptions('${sessionId}')">${dims.map(d=>`<option value="${esc(d.fieldKey)}">${esc(d.label)}</option>`).join('')}</select></label>
   <div id="dim-options"></div>
   <div id="dim-result"></div>
@@ -92,6 +93,13 @@ async function dimensionAnalysisView(sessionId){
   <div id="combined-filter-result" style="margin-top:1rem"></div>
   </section>`;
   renderDimensionOptions(sessionId);
+}
+async function saveCohortThreshold(sessionId){
+  let input=document.querySelector('#cohort-threshold-input'),value=parseInt(input.value,10);
+  if(!value||value<1)return notice('Le seuil doit être un nombre entier positif.');
+  let r=await api('/api/sessions/'+sessionId+'/min-cohort-n',{method:'PUT',body:JSON.stringify({value})});
+  document.querySelector('#cohort-threshold-value').textContent=r.value;
+  notice('Seuil de confidentialité mis à jour : '+r.value+' participant(s) minimum.');
 }
 function renderDimensionOptions(sessionId){
   let key=document.querySelector('#dim-select').value;
@@ -122,7 +130,7 @@ async function runDimensionFilter(sessionId){
     +bars(categoryBars,'standard')+bars(categoryBars,'graded')
     +`<h3 style="margin-top:1.2rem">Comparaison par domaine</h3>`
     +comparisonTableHtml(results,r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`)
-    +(suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Effectif insuffisant (moins de ${results[0].dimension.minRequired} participants validés) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}. Résultats masqués pour préserver l’anonymat.</p>`:'')
+    +(suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Résultats masqués car effectif inférieur au seuil de confidentialité (${results[0].dimension.minRequired}) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}.</p>`:'')
     +`<button class="secondary" style="margin-top:.6rem" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button>`;
 }
 // Filtres combinables entre PLUSIEURS dimensions differentes a la fois

@@ -10,9 +10,9 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.db=app.connect(Path(self.tmp.name)/'test.sqlite3'); app.init_db(self.db)
     def tearDown(self): self.db.close(); self.tmp.cleanup()
-    def _mk_session(self,sid,name='test',campaign_id=None,group_code=None,expected=None,owner=None,profile_schema_id=None):
+    def _mk_session(self,sid,name='test',campaign_id=None,group_code=None,expected=None,owner=None,profile_schema_id=None,min_cohort_n=None):
         t=self.db.execute('select id,version from templates').fetchone()
-        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],name,'','','', 'open',app.now(),None,'',expected,owner,campaign_id,group_code,None,None,None,profile_schema_id))
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],name,'','','', 'open',app.now(),None,'',expected,owner,campaign_id,group_code,None,None,None,profile_schema_id,min_cohort_n))
         return t['id']
     def _mk_user(self,uid,email=None,role='pilote'):
         h,salt=app.hash_password('motdepasse123')
@@ -35,7 +35,7 @@ class EngineTests(unittest.TestCase):
         t=self.db.execute('select id from templates').fetchone()['id']; payload=app.template_payload(self.db,t)
         self.assertEqual(len(payload['domains']),7); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),70)
     def test_grade_and_analysis_keep_raw_responses(self):
-        t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None))
+        t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         for n,v in [('a',1),('b',5)]:
             pid=n; self.db.execute('insert into participants values(?,?,?,?,?,?,?)',(pid,sid,n,'completed',app.now(),app.now(),None)); self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,inds,str(v),'numeric',app.now(),app.now()))
@@ -44,7 +44,7 @@ class EngineTests(unittest.TestCase):
     def test_reference_questionnaire_fix_never_touches_existing_version(self):
         t=self.db.execute('select id,version from templates').fetchone()
         sid='pinned-session'
-        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None))
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None,None))
         domain=self.db.execute('select id from domains where template_id=? order by display_order limit 1',(t['id'],)).fetchone()['id']
         indicator=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
         self.db.execute('insert into participants values(?,?,?,?,?,?,?)',('p',sid,'p','completed',app.now(),app.now(),None))
@@ -65,7 +65,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.execute('select template_version from sessions where id=?',(sid,)).fetchone()['template_version'],t['version'])
     def test_qualitative_chain_is_persistent_and_exported(self):
         t=self.db.execute('select id,version from templates').fetchone(); sid='qualitative-session'
-        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None))
+        self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; indicator=self.db.execute('select id from indicators where domain_id=? limit 1',(domain,)).fetchone()['id']
         self.db.execute('insert into priorities values(?,?,?,?,?,?)',('priority',sid,domain,indicator,1,app.now()))
         self.db.execute('insert into priority_analyses values(?,?,?,?,?,?)',('analysis',sid,'priority','Constat',app.now(),app.now()))
@@ -1315,6 +1315,38 @@ class EngineTests(unittest.TestCase):
         # Counts stay visible even when the numbers are suppressed - needed by
         # the UI to explain *why* it's hiding the results.
         self.assertEqual(result['participantCount'],2)
+
+    # --- Correctifs cibles :8820 (consignes_claude.txt point 6) : seuil de
+    # confidentialite explicite/configurable par session, jamais supprime ---
+
+    def test_resolve_min_cohort_n_defaults_to_the_conservative_constant(self):
+        sid='sess-threshold-default'; self._mk_session(sid)
+        self.assertEqual(app.resolve_min_cohort_n(self.db,sid),app.MIN_COHORT_N)
+
+    def test_n4_is_suppressed_at_default_threshold_then_visible_once_lowered(self):
+        # Scenario prescrit par consignes_claude.txt : N=4 avec seuil 5 -> masque,
+        # puis seuil 3 -> affiche - la protection n'est jamais retiree, seulement
+        # rendue configurable.
+        sid='sess-threshold-n4'; self._mk_dimension_session(sid,n_f=4,n_m=4)
+        self.assertEqual(app.resolve_min_cohort_n(self.db,sid),5)
+        masked=app.dimension_analysis(self.db,sid,'genre','F')
+        self.assertEqual(masked['completedCount'],4)
+        self.assertTrue(masked['dimension']['suppressed'])
+        self.assertIsNone(masked['domains'][0]['capacity'])
+
+        self.db.execute('update sessions set min_cohort_n=3 where id=?',(sid,)); self.db.commit()
+        self.assertEqual(app.resolve_min_cohort_n(self.db,sid),3)
+        visible=app.dimension_analysis(self.db,sid,'genre','F',min_n=app.resolve_min_cohort_n(self.db,sid))
+        self.assertEqual(visible['completedCount'],4)
+        self.assertFalse(visible['dimension']['suppressed'])
+        self.assertIsNotNone(visible['domains'][0]['capacity'])
+
+    def test_min_cohort_n_route_updates_and_reads_back(self):
+        sid='sess-threshold-route'; self._mk_session(sid)
+        current=self.db.execute('select min_cohort_n from sessions where id=?',(sid,)).fetchone()['min_cohort_n']
+        self.assertIsNone(current)
+        self.db.execute('update sessions set min_cohort_n=3 where id=?',(sid,)); self.db.commit()
+        self.assertEqual(app.resolve_min_cohort_n(self.db,sid),3)
 
     def test_dimension_analysis_no_matching_participant_returns_empty_cohort_without_crashing(self):
         sid='sess-dim-empty'; self._mk_dimension_session(sid,n_f=0,n_m=5)

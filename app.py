@@ -72,7 +72,7 @@ from epc.qualitatif import (
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
     migrate_legacy_qualitative_data,
 )
-from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, filtered_analysis, objective_findings, MIN_COHORT_N
+from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, filtered_analysis, objective_findings, resolve_min_cohort_n, MIN_COHORT_N
 from epc.profile import (
     create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
     create_profile_field, update_profile_field, delete_profile_field,
@@ -401,6 +401,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json(200, list_session_participants(db, path.split("/")[3]))
             if path.startswith("/api/sessions/") and path.endswith("/dimensions"):
                 return self.json(200, available_dimensions(db, path.split("/")[3]))
+            if path.startswith("/api/sessions/") and path.endswith("/min-cohort-n"):
+                sid = path.split("/")[3]
+                return self.json(200, {"value": resolve_min_cohort_n(db, sid), "default": MIN_COHORT_N})
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
                 sid = path.split("/")[3]
                 dimension, values = query.get("dimension", [None])[0], query.get("value", [])
@@ -427,7 +430,7 @@ class Handler(SimpleHTTPRequestHandler):
                     # docstring) - always returns {"results": [...]}, even for a
                     # single value, so callers don't need two response shapes.
                     try:
-                        results = dimension_analysis_multi(db, sid, dimension, values)
+                        results = dimension_analysis_multi(db, sid, dimension, values, min_n=resolve_min_cohort_n(db, sid))
                         # Findings base on the whole, unfiltered session (never on a
                         # single cohort) so "forces"/"fragilites" stay comparable across
                         # calls; "comparison" additionally flags capacity gaps between
@@ -800,6 +803,11 @@ class Handler(SimpleHTTPRequestHandler):
                 db.execute("INSERT INTO report_ai_blocks (id,session_id,section_key,content,retained_at) VALUES (?,?,?,?,?) "
                     "ON CONFLICT(session_id,section_key) DO UPDATE SET content=excluded.content,retained_at=excluded.retained_at",
                     (str(uuid.uuid4()), sid, section, content, now())); db.commit(); return self.json(200, {"ok": True})
+            if path.startswith("/api/sessions/") and path.endswith("/min-cohort-n"):
+                sid = path.split("/")[3]
+                value = data.get("value")
+                db.execute("UPDATE sessions SET min_cohort_n=? WHERE id=?", (int(value) if value not in (None, "") else None, sid))
+                db.commit(); return self.json(200, {"value": resolve_min_cohort_n(db, sid), "default": MIN_COHORT_N})
             if path.startswith("/api/sessions/"):
                 sid=path.split("/")[3]
                 if not update_session(db, sid, data): return self.json(404,{"error":"Questionnaire introuvable"})
