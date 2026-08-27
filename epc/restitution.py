@@ -453,7 +453,7 @@ def docx_grid_chart(items):
         elif cx + dx < left + 16: dx = abs(dx)
         if cy + dy < top + 12: dy = abs(dy)
         elif cy + dy > bottom - 12: dy = -abs(dy)
-        draw.text((cx + dx, cy + dy), str(i + 1), font=f_num, fill="#000080", anchor="lm" if dx > 0 else "rm")
+        draw.text((cx + dx, cy + dy), pdf_short_label(d), font=f_num, fill="#000080", anchor="lm" if dx > 0 else "rm")
     ax, ay = sx(avg_cap), sy(avg_cons)
     label = "Moyenne générale"
     label_w = docx_text_w(draw, label, f_num)
