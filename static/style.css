@@ -336,9 +336,10 @@ th{color:var(--gray-500);font-weight:600;font-size:.8rem;text-transform:uppercas
 .notice>div{width:min(430px,90vw);background:#fff;padding:1.3rem;border-radius:var(--radius-lg);box-shadow:0 8px 30px #0005}
 .notice p{white-space:pre-line}
 
-/* ---------- Help panel ---------- */
-.help-modal{position:fixed;inset:0;background:#0006;display:grid;place-items:center;z-index:20;padding:2rem 1rem}
-.help-modal>div{width:min(720px,94vw);max-height:88vh;overflow-y:auto;background:#fff;padding:1.6rem 1.9rem;border-radius:var(--radius-lg);box-shadow:0 8px 30px #0005}
+/* ---------- Help panel / edit modal ---------- */
+.help-modal,.edit-modal{position:fixed;inset:0;background:#0006;display:grid;place-items:center;z-index:20;padding:2rem 1rem}
+.help-modal>div,.edit-modal>div{width:min(720px,94vw);max-height:88vh;overflow-y:auto;background:#fff;padding:1.6rem 1.9rem;border-radius:var(--radius-lg);box-shadow:0 8px 30px #0005}
+.edit-modal h3{margin:0 0 .9rem}
 .help-modal h2{margin:0 0 .3rem}
 .help-modal h3{margin:1.3rem 0 .4rem;color:var(--accent-600)}
 .help-modal p{margin:.3rem 0}
