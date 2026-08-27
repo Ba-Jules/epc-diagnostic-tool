@@ -493,6 +493,7 @@ class Handler(SimpleHTTPRequestHandler):
         except AuthRequiredError: return self.json(401, {"error": "Connexion requise."})
         except PermissionDeniedError: return self.json(403, {"error": "Accès refusé : cette ressource ne vous appartient pas."})
         except ValueError as e: return self.json(404, {"error": str(e)})
+        except Exception: return self.json(500, {"error": "Erreur interne inattendue lors de la génération du fichier."})
         finally: db.close()
 
     def do_POST(self):

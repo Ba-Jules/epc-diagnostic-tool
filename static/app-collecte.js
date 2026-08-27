@@ -166,7 +166,7 @@ async function runCombinedFilter(sessionId){
   if(!result.completedCount){box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = 0</p><p class="muted">Pas de répondant correspondant à ces critères.</p>`;return}
   box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = ${result.completedCount}</p>`
     +`<div class="grid"><div class="metric"><span class="label">Capacité</span><b>${fmt(result.global.capacity)}</b></div><div class="metric"><span class="label">Consensus</span><b>${fmtConsensus(result.global)}</b></div><div class="metric"><span class="label">Capacité graduée</span><b>${fmt(result.global.gradedCapacity)}</b></div><div class="metric"><span class="label">Consensus gradué</span><b>${fmt(result.global.gradedConsensus)}</b></div></div>${bars(result.domains,'standard')}${bars(result.domains,'graded')}`
-    +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="downloadFilteredAnalysis('xlsx')">Exporter l’analyse filtrée (Excel)</button><button class="secondary" onclick="downloadFilteredAnalysis('csv')">Exporter l’analyse filtrée (CSV)</button>${Object.keys(filters).length?`<button class="secondary" onclick="retainCombinedComparison('${sessionId}')">Retenir cette comparaison pour la synthèse finale</button>`:''}</div>`;
+    +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="downloadFilteredAnalysis('xlsx',this)">Exporter l’analyse filtrée (Excel)</button><button class="secondary" onclick="downloadFilteredAnalysis('csv',this)">Exporter l’analyse filtrée (CSV)</button>${Object.keys(filters).length?`<button class="secondary" onclick="retainCombinedComparison('${sessionId}')">Retenir cette comparaison pour la synthèse finale</button>`:''}</div>`;
 }
 async function retainCombinedComparison(sessionId){
   let {filters}=window.combinedFilterResult||{};
@@ -180,17 +180,11 @@ async function retainCombinedComparison(sessionId){
     notice('Comparaison retenue pour la synthèse finale.');
   }catch(err){notice(err.message)}
 }
-async function downloadFilteredAnalysis(ext){
+async function downloadFilteredAnalysis(ext,btn){
   let{sessionId,filters}=window.combinedFilterResult||{};
   if(!sessionId)return;
   let qs=combinedFilterQueryString(filters);
-  try{
-    let r=await fetch('/api/sessions/'+sessionId+'/filtered-analysis.'+ext+(qs?'?'+qs:''));
-    if(!r.ok){let x=await r.json().catch(()=>({}));throw Error(x.error||'Le fichier n’a pas pu être généré.')}
-    let blob=await r.blob(),cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename=([^;]+)/),filename=m?m[1].replace(/["']/g,''):`analyse-filtree.${ext}`;
-    let u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=filename;document.body.appendChild(a);a.click();a.remove();
-    setTimeout(()=>URL.revokeObjectURL(u),1000);
-  }catch(e){notice(e.message||'Téléchargement impossible. Veuillez réessayer.')}
+  await downloadServerFile('/api/sessions/'+sessionId+'/filtered-analysis.'+ext+(qs?'?'+qs:''),`analyse-filtree.${ext}`,btn);
 }
 function exportDimensionCsv(){
   let {values,results}=window.dimensionResults;

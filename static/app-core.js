@@ -13,6 +13,22 @@ const pctOf=(done,target)=>target?Math.round(done/target*100):null,pctLabel=p=>p
 // non stylable et bloquante. Reutilisee par causes/consequences/leviers et
 // par l'edition des recommandations (app-augmentations.js).
 function openModal(html){let n=document.querySelector('#edit-modal');if(!n){n=document.createElement('div');n.id='edit-modal';document.body.appendChild(n)}n.className='edit-modal';n.innerHTML=`<div>${html}</div>`}
+// Téléchargement d'un fichier généré côté serveur (export XLSX/DOCX/CSV) :
+// remplace les <a href> bruts pour garder un statut visible pendant la
+// génération et un message d'erreur exploitable en cas d'échec (correctifs
+// ciblés :8820, point 7), sans jamais quitter la page en SPA.
+async function downloadServerFile(url,fallbackName,btn){
+  let original=btn?btn.textContent:null;
+  if(btn){btn.disabled=true;btn.textContent='Téléchargement…'}
+  try{
+    let r=await fetch(url);
+    if(!r.ok){let x=await r.json().catch(()=>({}));throw Error(x.error||'Le fichier n’a pas pu être généré.')}
+    let blob=await r.blob(),cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename=([^;]+)/),filename=m?m[1].replace(/["']/g,''):fallbackName;
+    let u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=filename;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),1000);
+  }catch(e){notice(e.message||'Téléchargement impossible. Veuillez réessayer.')}
+  finally{if(btn){btn.disabled=false;btn.textContent=original}}
+}
 function closeModal(){document.querySelector('#edit-modal')?.remove()}
 const api=(p,o={})=>fetch(p,{headers:{'Content-Type':'application/json'},...o}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error||'Action impossible.');return x}); window.addEventListener('unhandledrejection',e=>{e.preventDefault();notice(e.reason?.message||'Action impossible. Veuillez réessayer.');}); window.addEventListener('error',e=>{if(e.message)notice('Une action ne peut pas être réalisée : '+e.message)});let T=[],S=[];
 async function load(){[T,S]=await Promise.all([api('/api/templates'),api('/api/sessions')]);shell('home','','Diagnostic EPC / SENEVAL','Préparation, collecte et restitution d’ateliers',null);home()};const back='<button class="ghost" onclick="load()">← Retour à l’accueil</button>';
