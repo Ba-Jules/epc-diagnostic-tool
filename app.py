@@ -39,6 +39,7 @@ from epc.restitution import (
     qualitative_data, report_data, report_xlsx, report_docx, _n, _c,
     individual_responses_rows, individual_responses_xlsx, individual_responses_csv,
     filtered_analysis_rows, filtered_analysis_xlsx, filtered_analysis_csv,
+    retained_comparisons_summary,
 )
 from epc.auth import (
     AuthRequiredError, PermissionDeniedError, PUBLIC_API_EXACT, is_public_api,
@@ -70,9 +71,9 @@ from epc.qualitatif import (
     create_workshop_recommendation, update_workshop_recommendation, delete_workshop_recommendation,
     create_training_topic, update_training_topic, delete_training_topic,
     upsert_report_meta, create_analysis_note, create_legacy_recommendation,
-    migrate_legacy_qualitative_data,
+    migrate_legacy_qualitative_data, retain_comparison, delete_retained_comparison,
 )
-from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, filtered_analysis, objective_findings, resolve_min_cohort_n, MIN_COHORT_N
+from epc.scoring import grade, analysis, analysis_for, dimension_analysis, dimension_analysis_multi, filtered_analysis, objective_findings, resolve_min_cohort_n, resolve_comparison_spec, MIN_COHORT_N
 from epc.profile import (
     create_profile_schema, update_profile_schema, delete_profile_schema, profile_schema_payload,
     create_profile_field, update_profile_field, delete_profile_field,
@@ -404,6 +405,8 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/sessions/") and path.endswith("/min-cohort-n"):
                 sid = path.split("/")[3]
                 return self.json(200, {"value": resolve_min_cohort_n(db, sid), "default": MIN_COHORT_N})
+            if path.startswith("/api/sessions/") and path.endswith("/retained-comparisons"):
+                return self.json(200, retained_comparisons_summary(db, path.split("/")[3]))
             if path.startswith("/api/sessions/") and path.endswith("/analysis"):
                 sid = path.split("/")[3]
                 dimension, values = query.get("dimension", [None])[0], query.get("value", [])
@@ -769,6 +772,15 @@ class Handler(SimpleHTTPRequestHandler):
                 sid=path.split("/")[3]; return self.json(201,{"id":create_training_topic(db, sid, data)})
             if path.endswith("/report-meta"):
                 sid=path.split("/")[3]; upsert_report_meta(db, sid, data); return self.json(200,{"ok":True})
+            if path.endswith("/retained-comparisons"):
+                sid=path.split("/")[3]
+                spec = data.get("spec") or {}
+                if spec.get("kind") not in ("dimension", "filters"): return self.json(400, {"error": "Spécification de comparaison invalide."})
+                try:
+                    resolve_comparison_spec(db, sid, spec)  # validates the spec resolves without error before persisting it
+                except ValueError as e:
+                    return self.json(400, {"error": str(e)})
+                return self.json(201, {"id": retain_comparison(db, sid, data.get("label") or "Comparaison", spec)})
             if path.endswith("/analysis-notes"):
                 sid = path.split("/")[3]; create_analysis_note(db, sid, data); return self.json(201, {"ok": True})
             if path.endswith("/recommendations"):
@@ -869,6 +881,8 @@ class Handler(SimpleHTTPRequestHandler):
             if path.startswith("/api/sessions/") and "/ai/report-block/" in path:
                 sid=path.split("/")[3]; section=path.rsplit("/",1)[1]
                 db.execute("DELETE FROM report_ai_blocks WHERE session_id=? AND section_key=?",(sid,section)); db.commit(); return self.json(200,{"ok":True})
+            if path.startswith("/api/retained-comparisons/"):
+                delete_retained_comparison(db, path.rsplit("/", 1)[1]); return self.json(200, {"ok": True})
             if path.startswith("/api/analysis-entries/"):
                 eid=path.split("/")[3]; force = parse_qs(urlparse(self.path).query).get("force",["0"])[0] == "1"
                 deleted, dependent = delete_analysis_entry(db, eid, force=force)

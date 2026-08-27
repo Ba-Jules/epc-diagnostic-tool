@@ -1435,6 +1435,63 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.filtered_analysis(self.db,sid,{'organisation':['ONG A']})
 
+    # --- Correctifs cibles :8820 (consignes_claude.txt point 5) : comparaisons
+    # retenues explicitement par le pilote pour la synthese finale - jamais de
+    # nombres stockes, resolve_comparison_spec() recalcule toujours en direct ---
+
+    def test_retain_list_and_delete_dimension_comparison_round_trip(self):
+        sid='sess-retain-dim'; self._mk_dimension_session(sid)
+        cid=app.retain_comparison(self.db,sid,'Genre : F, M',{'kind':'dimension','fieldKey':'genre','values':['F','M']})
+        summary=app.retained_comparisons_summary(self.db,sid)
+        self.assertEqual(len(summary),1)
+        self.assertEqual(summary[0]['id'],cid)
+        self.assertEqual(summary[0]['label'],'Genre : F, M')
+        self.assertEqual([c['label'] for c in summary[0]['categories']],['F','M'])
+        self.assertEqual(summary[0]['categories'][0]['n'],5)
+        self.assertEqual(summary[0]['categories'][0]['capacity'],100)
+        self.assertEqual(summary[0]['gap'],80)
+
+        app.delete_retained_comparison(self.db,cid)
+        self.assertEqual(app.retained_comparisons_summary(self.db,sid),[])
+
+    def test_retain_and_resolve_filters_kind_comparison(self):
+        sid='sess-retain-filters'; self._mk_combined_filter_session(sid)
+        cid=app.retain_comparison(self.db,sid,'Femmes francophones',{'kind':'filters','filters':{'genre':['F'],'langues':['fr']}})
+        summary=app.retained_comparisons_summary(self.db,sid)
+        self.assertEqual(len(summary),1)
+        self.assertEqual(summary[0]['categories'][0]['n'],5)
+        self.assertEqual(summary[0]['categories'][0]['capacity'],100)
+        self.assertIsNone(summary[0]['gap'])  # single-category filters comparison: no gap
+
+    def test_retained_comparison_recomputes_live_never_stale(self):
+        # La comparaison retenue ne stocke que la specification (jamais les
+        # nombres) : si de nouvelles reponses arrivent apres coup, la synthese
+        # doit refleter les nouveaux chiffres sans avoir ete re-enregistree.
+        sid='sess-retain-live'; self._mk_dimension_session(sid,n_f=2,n_m=5)
+        tid=self.db.execute('select template_id from sessions where id=?',(sid,)).fetchone()['template_id']
+        cid=app.retain_comparison(self.db,sid,'Genre : F',{'kind':'dimension','fieldKey':'genre','values':['F']})
+        before=app.retained_comparisons_summary(self.db,sid)[0]
+        self.assertTrue(before['categories'][0]['suppressed'])  # N=2 < seuil par defaut 5
+        for i in range(5):
+            pid=f'{sid}-f-extra{i}'; self._add_participant(sid,pid,tid,value=5,n=1)
+            app.set_participant_profile_values(self.db,pid,{'genre':'F'})
+        self.db.commit()
+        after=app.retained_comparisons_summary(self.db,sid)[0]
+        self.assertEqual(after['categories'][0]['n'],7)
+        self.assertFalse(after['categories'][0]['suppressed'])
+
+    def test_report_data_includes_only_explicitly_retained_comparisons(self):
+        # Scenario prescrit par consignes_claude.txt (section 9) : la synthese
+        # finale ne doit jamais afficher automatiquement toutes les
+        # explorations temporaires, seulement celles retenues par le pilote.
+        sid='sess-retain-report'; self._mk_dimension_session(sid)
+        data=app.report_data(self.db,sid)
+        self.assertEqual(data['retainedComparisons'],[])
+        app.retain_comparison(self.db,sid,'Genre : F, M',{'kind':'dimension','fieldKey':'genre','values':['F','M']})
+        data=app.report_data(self.db,sid)
+        self.assertEqual(len(data['retainedComparisons']),1)
+        self.assertEqual(data['retainedComparisons'][0]['label'],'Genre : F, M')
+
     # --- Mission parite :8810->:8820 (consignes_claude.txt) : constats
     # automatiques deterministes - epc/scoring.py objective_findings() ---
 

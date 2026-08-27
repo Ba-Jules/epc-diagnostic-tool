@@ -131,7 +131,17 @@ async function runDimensionFilter(sessionId){
     +`<h3 style="margin-top:1.2rem">Comparaison par domaine</h3>`
     +comparisonTableHtml(results,r=>`<th colspan="2">${esc(r.dimension.value)} (${r.completedCount} validé${r.completedCount>1?'s':''})<br><span class="text-meta">Capacité / Consensus</span></th>`)
     +(suppressedValues.length?`<p class="muted small" style="margin-top:.6rem">⚠ Résultats masqués car effectif inférieur au seuil de confidentialité (${results[0].dimension.minRequired}) pour : ${suppressedValues.map(v=>esc(v)).join(', ')}.</p>`:'')
-    +`<button class="secondary" style="margin-top:.6rem" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button>`;
+    +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="exportDimensionCsv()">Exporter ce comparatif (CSV)</button><button class="secondary" onclick="retainDimensionComparison('${sessionId}')">Retenir cette comparaison pour la synthèse finale</button></div>`;
+}
+async function retainDimensionComparison(sessionId){
+  let {key,values}=window.dimensionResults||{};
+  if(!key||!values||!values.length)return;
+  let dim=(window.dimensionFields||[]).find(d=>d.fieldKey===key);
+  let label=(dim?dim.label:key)+' : '+values.join(', ');
+  try{
+    await api('/api/sessions/'+sessionId+'/retained-comparisons',{method:'POST',body:JSON.stringify({label,spec:{kind:'dimension',fieldKey:key,values}})});
+    notice('Comparaison retenue pour la synthèse finale.');
+  }catch(err){notice(err.message)}
 }
 // Filtres combinables entre PLUSIEURS dimensions differentes a la fois
 // (mission de parite :8810->:8820, cf. consignes_claude.txt) - distinct de
@@ -156,7 +166,19 @@ async function runCombinedFilter(sessionId){
   if(!result.completedCount){box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = 0</p><p class="muted">Pas de répondant correspondant à ces critères.</p>`;return}
   box.innerHTML=`<p class="text-meta">Population analysée : ${filtLabel} · N = ${result.completedCount}</p>`
     +`<div class="grid"><div class="metric"><span class="label">Capacité</span><b>${fmt(result.global.capacity)}</b></div><div class="metric"><span class="label">Consensus</span><b>${fmtConsensus(result.global)}</b></div><div class="metric"><span class="label">Capacité graduée</span><b>${fmt(result.global.gradedCapacity)}</b></div><div class="metric"><span class="label">Consensus gradué</span><b>${fmt(result.global.gradedConsensus)}</b></div></div>${bars(result.domains,'standard')}${bars(result.domains,'graded')}`
-    +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="downloadFilteredAnalysis('xlsx')">Exporter l’analyse filtrée (Excel)</button><button class="secondary" onclick="downloadFilteredAnalysis('csv')">Exporter l’analyse filtrée (CSV)</button></div>`;
+    +`<div class="row" style="margin-top:.6rem"><button class="secondary" onclick="downloadFilteredAnalysis('xlsx')">Exporter l’analyse filtrée (Excel)</button><button class="secondary" onclick="downloadFilteredAnalysis('csv')">Exporter l’analyse filtrée (CSV)</button>${Object.keys(filters).length?`<button class="secondary" onclick="retainCombinedComparison('${sessionId}')">Retenir cette comparaison pour la synthèse finale</button>`:''}</div>`;
+}
+async function retainCombinedComparison(sessionId){
+  let {filters}=window.combinedFilterResult||{};
+  if(!filters||!Object.keys(filters).length)return;
+  let label=Object.entries(filters).map(([k,v])=>{
+    let dim=(window.dimensionFields||[]).find(d=>d.fieldKey===k);
+    return (dim?dim.label:k)+' = '+v.join(', ');
+  }).join(' · ');
+  try{
+    await api('/api/sessions/'+sessionId+'/retained-comparisons',{method:'POST',body:JSON.stringify({label,spec:{kind:'filters',filters}})});
+    notice('Comparaison retenue pour la synthèse finale.');
+  }catch(err){notice(err.message)}
 }
 async function downloadFilteredAnalysis(ext){
   let{sessionId,filters}=window.combinedFilterResult||{};

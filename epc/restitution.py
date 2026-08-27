@@ -22,7 +22,8 @@ from io import BytesIO, StringIO
 
 from .db import MODEL_KEY_EPC_SENEVAL, rows, template_payload
 from .profile import get_participant_profile_values, participant_profile_breakdown, resolve_session_profile_schema_id
-from .scoring import analysis, filtered_analysis
+from .qualitatif import list_retained_comparisons
+from .scoring import analysis, filtered_analysis, resolve_comparison_spec
 
 
 def findings_rows(findings: dict) -> list[list]:
@@ -858,9 +859,20 @@ def qualitative_data(db, session_id: str):
         "trainingTopics": rows(db, "SELECT * FROM training_topics WHERE session_id=? ORDER BY created_at", (session_id,)),
     }
 
+def retained_comparisons_summary(db, session_id: str) -> list[dict]:
+    """The pilot-retained comparisons/desagregations for this session, each
+    recomputed live (correctifs cibles :8820, point 5) - never every ephemeral
+    exploration, only what was explicitly retained via "Retenir"."""
+    out = []
+    for row in list_retained_comparisons(db, session_id):
+        live = resolve_comparison_spec(db, session_id, row["spec"])
+        out.append({"id": row["id"], "label": row["label"], "createdAt": row["created_at"], **live})
+    return out
+
+
 def report_data(db, session_id: str):
     a=analysis(db,session_id)
     if not a: return None
     meta=db.execute("SELECT * FROM session_report_meta WHERE session_id=?",(session_id,)).fetchone()
     template=template_payload(db,a["session"]["template_id"])
-    return {"analysis":a,"template":template,"qualitative":qualitative_data(db,session_id),"meta":dict(meta) if meta else {"facilitator":"","audience":"","context":"","conclusion":""},"manifest":restitution_manifest(template),"profile":participant_profile_breakdown(db,session_id)}
+    return {"analysis":a,"template":template,"qualitative":qualitative_data(db,session_id),"meta":dict(meta) if meta else {"facilitator":"","audience":"","context":"","conclusion":""},"manifest":restitution_manifest(template),"profile":participant_profile_breakdown(db,session_id),"retainedComparisons":retained_comparisons_summary(db,session_id)}

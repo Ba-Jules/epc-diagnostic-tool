@@ -14,6 +14,7 @@ d'erreur specifique a la route.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 
@@ -109,6 +110,34 @@ def update_training_topic(db: sqlite3.Connection, topic_id: str, data: dict) -> 
 
 def delete_training_topic(db: sqlite3.Connection, topic_id: str) -> None:
     db.execute("DELETE FROM training_topics WHERE id=?", (topic_id,))
+    db.commit()
+
+
+# Comparaisons/desagregations RETENUES par le pilote pour la synthese finale
+# et le rapport (correctifs cibles :8820, cf. consignes_claude.txt point 5) -
+# seule la SPEC (dimension/valeurs ou filtres combines) est memorisee, jamais
+# les chiffres eux-memes : la synthese/le rapport les recalcule toujours en
+# direct (epc.scoring.resolve_comparison_spec) pour ne jamais afficher un
+# nombre perime si des reponses arrivent apres coup. "Ne pas afficher
+# automatiquement toutes les explorations temporaires" : rien n'est retenu
+# tant que le pilote ne clique pas explicitement "Retenir".
+def retain_comparison(db: sqlite3.Connection, session_id: str, label: str, spec: dict) -> str:
+    cid = str(uuid.uuid4())
+    db.execute("INSERT INTO retained_comparisons (id,session_id,label,spec_json,created_at) VALUES (?,?,?,?,?)",
+        (cid, session_id, label, json.dumps(spec), now()))
+    db.commit()
+    return cid
+
+
+def list_retained_comparisons(db: sqlite3.Connection, session_id: str) -> list[dict]:
+    out = rows(db, "SELECT * FROM retained_comparisons WHERE session_id=? ORDER BY created_at", (session_id,))
+    for r in out:
+        r["spec"] = json.loads(r.pop("spec_json"))
+    return out
+
+
+def delete_retained_comparison(db: sqlite3.Connection, comparison_id: str) -> None:
+    db.execute("DELETE FROM retained_comparisons WHERE id=?", (comparison_id,))
     db.commit()
 
 

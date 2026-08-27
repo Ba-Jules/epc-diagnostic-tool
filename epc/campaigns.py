@@ -22,7 +22,7 @@ from .util import slugify
 # or as part of a campaign cascade) always means deleting exactly these first.
 SESSION_CHILD_TABLES = ("training_topics", "workshop_recommendations", "analysis_entries", "priority_analyses",
                          "analysis_notes", "recommendations", "responses", "participant_profile_values",
-                         "priorities", "participants", "session_report_meta")
+                         "priorities", "participants", "session_report_meta", "retained_comparisons")
 
 GROUP_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d", "#ea580c", "#4338ca"]
 

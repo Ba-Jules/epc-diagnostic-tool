@@ -30,3 +30,6 @@ Thumbs.db
 # Temporary code-generation artifacts
 gemini-code-*
 server.log
+
+# Per-session instruction drop file (not part of the codebase)
+consignes_claude.txt

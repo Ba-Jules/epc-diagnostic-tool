@@ -293,3 +293,26 @@ def filtered_analysis(db, session_id: str, filters: dict):
     result["filters"] = {"applied": [{"fieldKey": k, "fieldLabel": fields[k]["label"], "values": v} for k, v in filters.items()]}
     result["findings"] = objective_findings(result)
     return result
+
+
+def resolve_comparison_spec(db, session_id: str, spec: dict) -> dict:
+    """Recomputes, live, the small summary a retained comparison/desagregation
+    needs for the synthese finale/rapport (correctifs cibles :8820, cf.
+    consignes_claude.txt point 5) : N and capacity per category, plus the
+    largest capacity gap observed - never stored numbers, so a retained
+    comparison can never go stale if responses keep coming in after it was
+    retained. `spec` is {"kind":"dimension","fieldKey":...,"values":[...]}
+    (compares several values of one dimension) or
+    {"kind":"filters","filters":{field_key:[values]}} (one combined-filter
+    cohort) - the exact same shapes already produced by the /analysis route,
+    so no dimension name is ever hardcoded here either."""
+    if spec["kind"] == "dimension":
+        results = dimension_analysis_multi(db, session_id, spec["fieldKey"], spec["values"], min_n=resolve_min_cohort_n(db, session_id))
+        categories = [{"label": r["dimension"]["value"], "n": r["completedCount"], "capacity": r["global"]["capacity"], "suppressed": r["dimension"]["suppressed"]} for r in results]
+    else:
+        result = filtered_analysis(db, session_id, spec["filters"])
+        filt_label = "; ".join(f"{f['fieldLabel']}={','.join(str(v) for v in f['values'])}" for f in result["filters"]["applied"]) if result else ""
+        categories = [{"label": filt_label or "Tous les participants", "n": result["completedCount"] if result else 0, "capacity": result["global"]["capacity"] if result else None, "suppressed": False}]
+    caps = [c["capacity"] for c in categories if c["capacity"] is not None]
+    gap = (max(caps) - min(caps)) if len(caps) >= 2 else None
+    return {"categories": categories, "gap": gap}

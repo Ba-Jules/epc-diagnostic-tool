@@ -102,12 +102,16 @@ function findingsForcesHtml(findings){let domFmt=d=>`<p>${esc(d.label)} — capa
 function findingsFragilitesHtml(findings){let domFmt=d=>`<p>${esc(d.label)} — capacité ${fmt(d.capacity)}, consensus ${fmtConsensus(d)}</p>`,indFmt=i=>`<p>${esc(i.domain)} — ${esc(i.label)} — capacité ${fmt(i.capacity)}, consensus ${fmtConsensus(i)}</p>`,html=findings.fragilites.domains.map(domFmt).join('')+findings.fragilites.indicators.map(indFmt).join('');return html||'<p class="muted">Aucune fragilité notable.</p>'}
 function findingsVigilanceHtml(findings){if(!findings.vigilance.length)return '<p class="muted">Aucun point de vigilance notable.</p>';return findings.vigilance.map(v=>v.reason==='ecart_sous_populations'?`<p>${esc(v.label)} — écart de ${fmt(v.gap)} points entre catégories comparées</p>`:`<p>${esc(v.label)} — capacité ${fmt(v.capacity)}, consensus ${fmt(v.consensus)}</p>`).join('')}
 function domainsTableRows(domains){return `<div class="table-wrap"><table><tr><th>Domaine</th><th>Capacité</th><th>Consensus</th><th>Graduées</th><th>Niveau</th><th>Réponses</th></tr>${domains.map(d=>`<tr><td>${esc(d.label)}</td><td>${fmt(d.capacity)}</td><td>${fmtConsensus(d)}</td><td>${d.gradedCapacity??'—'} / ${d.gradedConsensus??'—'}</td><td>${esc(level(d.capacity))}</td><td>${d.responses}</td></tr>`).join('')}</table></div>`}
-// Comparaison retenue pendant la session de travail courante (etat client
-// ephemere, comme window.__lastComparison de :8810 - pas une donnee
-// persistee) : window.dimensionResults est pose par runDimensionFilter()
-// (app-collecte.js) apres un "Comparer". Generique : aucun nom de dimension
-// en dur, lit le libelle depuis window.dimensionFields.
-function comparisonSummaryHtml(){if(!window.dimensionResults)return '<p class="muted">Aucune comparaison réalisée pendant cette session de travail.</p>';let{key,results}=window.dimensionResults,dim=(window.dimensionFields||[]).find(d=>d.fieldKey===key);return `<p class="text-meta">Comparaison retenue : ${esc(dim?dim.label:key)}</p><div class="table-wrap"><table><tr><th>Catégorie</th><th>N</th><th>Capacité</th><th>Consensus</th></tr>${results.map(r=>`<tr><td>${esc(r.dimension.value)}</td><td>${r.completedCount}</td><td>${fmt(r.global.capacity)}</td><td>${fmtConsensus(r.global)}</td></tr>`).join('')}</table></div>`}
+// Comparaisons explicitement retenues par le pilote (persistées côté
+// serveur via /api/sessions/{id}/retained-comparisons, cf. correctifs
+// ciblés :8820 point 5) — jamais les explorations temporaires non retenues.
+// Les nombres sont recalculés en direct par resolve_comparison_spec() côté
+// serveur à chaque chargement, jamais stockés, donc jamais obsolètes.
+function retainedComparisonsHtml(list,sessionId){
+  if(!list||!list.length)return '<p class="muted">Aucune comparaison retenue pour cette synthèse. Depuis « Filtrer / comparer par profil », utilisez « Retenir cette comparaison » pour l’ajouter ici.</p>';
+  return list.map(c=>`<div style="margin-bottom:1rem"><p class="text-meta"><b>${esc(c.label)}</b> <button class="ghost" style="margin-left:.4rem" onclick="deleteRetainedComparison('${c.id}','${sessionId}')">Retirer</button></p><div class="table-wrap"><table><tr><th>Catégorie</th><th>N</th><th>Capacité</th></tr>${c.categories.map(cat=>`<tr><td>${esc(cat.label)}</td><td>${cat.n}</td><td>${cat.suppressed?'Masqué (effectif insuffisant)':fmt(cat.capacity)}</td></tr>`).join('')}</table></div>${c.gap!=null?`<p class="text-meta">Écart maximal observé : ${fmt(c.gap)} points</p>`:''}</div>`).join('');
+}
+async function deleteRetainedComparison(id,sessionId){await api('/api/retained-comparisons/'+id,{method:'DELETE'});notice('Comparaison retirée de la synthèse.');finalSummary(sessionId)}
 async function finalSummary(s){
   let r=await api('/api/sessions/'+s+'/report-data'),a=r.analysis,q=r.qualitative,retained=q.entries.filter(x=>x.validation_status==='RETENU');
   window.currentSessionId=s;shell('rapport','restitution',a.session.name,'Synthèse finale');
@@ -117,7 +121,7 @@ async function finalSummary(s){
     <h3>C · Diagnostic</h3><p>Capacité ${fmt(a.global.capacity)} · consensus ${fmtConsensus(a.global)} · gradués ${fmt(a.global.gradedCapacity)} / ${fmt(a.global.gradedConsensus)}</p>${domainsTableRows(a.domains)}
     <h3>D · Forces</h3><p class="text-meta">Constats chiffrés, pas des causes.</p>${findingsForcesHtml(a.findings)}
     <h3>E · Fragilités / points de vigilance</h3>${findingsFragilitesHtml(a.findings)}${findingsVigilanceHtml(a.findings)}
-    <h3>F · Désagrégations / comparaisons retenues</h3>${comparisonSummaryHtml()}
+    <h3>F · Désagrégations / comparaisons retenues</h3>${retainedComparisonsHtml(r.retainedComparisons,s)}
     <h3>G · Priorités retenues</h3><p>${q.priorities.length} priorité(s).</p>${q.priorities.map(p=>`<p>${esc(p.domain_label)} — ${esc(p.indicator_label)}</p>`).join('')}
     <h3>H · Analyses</h3>${q.priorities.map(p=>{let an=q.analyses.find(x=>x.priority_id===p.id),e=retained.filter(x=>x.priority_id===p.id);return `<section><h4>${esc(p.domain_label)} — ${esc(p.indicator_code)}</h4><p>${esc(p.indicator_label)}</p><p><b>Constat :</b> ${esc(an?.problem||'Analyse à compléter')}</p><p><b>Causes :</b> ${e.filter(x=>x.kind==='cause').map(x=>esc(x.content)).join(' ; ')||'—'}</p><p><b>Conséquences :</b> ${e.filter(x=>x.kind==='consequence').map(x=>esc(x.content)).join(' ; ')||'—'}</p><p><b>Leviers :</b> ${e.filter(x=>x.kind==='lever').map(x=>esc(x.content)).join(' ; ')||'—'}</p></section>`}).join('')||'<p class="muted">Aucune priorité.</p>'}
     <h3>I · Recommandations / formations / plan d’action</h3>${q.recommendations.filter(x=>x.status==='Retenue').map(x=>`<p><b>${esc(x.title)}</b> — ${esc(x.description)}</p>`).join('')||'<p class="muted">Aucune recommandation retenue.</p>'}${q.trainingTopics.map(x=>`<p><b>${esc(x.title)}</b> — ${esc(x.need_text||'—')}</p>`).join('')}
