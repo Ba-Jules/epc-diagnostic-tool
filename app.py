@@ -463,7 +463,11 @@ def init_schema(db: sqlite3.Connection) -> None:
     if "display_name" not in existing_columns:
         db.execute("ALTER TABLE participants ADD COLUMN display_name TEXT")
         db.commit()
-    for col, decl in (("anonymous", "INTEGER"), ("participant_type", "TEXT"), ("profile", "TEXT"), ("sex", "TEXT"), ("age_range", "TEXT"), ("education_level", "TEXT")):
+    for col, decl in (("anonymous", "INTEGER"), ("participant_type", "TEXT"), ("profile", "TEXT"), ("sex", "TEXT"), ("age_range", "TEXT"), ("education_level", "TEXT"),
+                      # Précision libre saisie quand education_level = "Autre" (mission :8810,
+                      # demande Mouhamed BA) : "Autre" reste la seule catégorie statistique,
+                      # ce texte n'est jamais utilisé pour créer de nouvelles catégories.
+                      ("education_level_other", "TEXT")):
         if col not in existing_columns:
             db.execute(f"ALTER TABLE participants ADD COLUMN {col} {decl}")
     db.commit()
@@ -742,6 +746,56 @@ def ensure_epc_35_template(db: sqlite3.Connection) -> None:
 
 def rows(db: sqlite3.Connection, sql: str, args=()):
     return [dict(r) for r in db.execute(sql, args).fetchall()]
+
+
+def template_domain_indicator_counts(db: sqlite3.Connection, template_id: str):
+    """Nombre de domaines/indicateurs ACTIFS d'un questionnaire, calculé depuis les
+    données réelles (jamais codé en dur) — utilisé par /api/templates pour afficher
+    par exemple "7 domaines x 10 indicateurs" (mission :8810, demande Mouhamed BA).
+    Le canonique EPC/SENEVAL reste 7 domaines / 70 indicateurs, inchangé."""
+    domain_count = db.execute("SELECT COUNT(*) FROM domains WHERE template_id=? AND active=1", (template_id,)).fetchone()[0]
+    indicator_count = db.execute(
+        "SELECT COUNT(*) FROM indicators i JOIN domains d ON d.id=i.domain_id WHERE d.template_id=? AND d.active=1 AND i.active=1",
+        (template_id,),
+    ).fetchone()[0]
+    return domain_count, indicator_count
+
+
+PARTICIPANT_PROFILE_FIELD_MAP = {"displayName": "display_name", "anonymous": "anonymous", "participantType": "participant_type", "profile": "profile", "sex": "sex", "ageRange": "age_range", "educationLevel": "education_level",
+    # Précision libre saisie quand educationLevel = "Autre" (mission :8810) — jamais
+    # utilisée comme catégorie statistique propre, seule "Autre" l'est.
+    "educationLevelOther": "education_level_other"}
+
+
+def create_session(db: sqlite3.Connection, owner_user_id: str, data: dict):
+    """Le bouton "Nouveau diagnostic" ("Créer l'atelier") crée une MISSION/atelier
+    qui pointe vers un questionnaire déjà existant (data["templateId"], le canonique
+    EPC/SENEVAL par défaut) — il ne crée jamais de nouveau questionnaire. Vérifié ici
+    explicitement (mission :8810, point B : le libellé "Créer le questionnaire" aurait
+    été trompeur pour cette action, donc non appliqué). Retourne None si le
+    questionnaire visé n'a aucun domaine actif avec question (rien n'est créé)."""
+    template = template_payload(db, data["templateId"])
+    if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]):
+        return None
+    sid = str(uuid.uuid4())
+    db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""),
+         "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, owner_user_id))
+    db.commit()
+    return sid
+
+
+def update_participant_profile_fields(db: sqlite3.Connection, pid: str, data: dict) -> None:
+    sets, vals = [], []
+    for key, col in PARTICIPANT_PROFILE_FIELD_MAP.items():
+        if key in data:
+            v = data[key]
+            v = (1 if v else 0) if key == "anonymous" else (v or None)
+            sets.append(f"{col}=?"); vals.append(v)
+    if sets:
+        vals.append(pid)
+        db.execute(f"UPDATE participants SET {','.join(sets)} WHERE id=?", vals)
+        db.commit()
 
 
 def session_label(db: sqlite3.Connection, sid: str) -> str:
@@ -1937,8 +1991,15 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/auth/me":
                 return self.json(200, {"user": {"id": user["id"], "email": user["email"], "role": user["role"], "displayName": user["display_name"]} if user else None})
             if path == "/api/templates":
-                if user["role"] == "admin": return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at,is_canonical FROM templates WHERE status='active' ORDER BY is_canonical DESC,name,version DESC"))
-                return self.json(200, rows(db, "SELECT id,name,version,description,status,created_at,updated_at,is_canonical FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY is_canonical DESC,name,version DESC", (user["id"],)))
+                if user["role"] == "admin": tpl_rows = rows(db, "SELECT id,name,version,description,status,created_at,updated_at,is_canonical FROM templates WHERE status='active' ORDER BY is_canonical DESC,name,version DESC")
+                else: tpl_rows = rows(db, "SELECT id,name,version,description,status,created_at,updated_at,is_canonical FROM templates WHERE status='active' AND (owner_user_id IS NULL OR owner_user_id=?) ORDER BY is_canonical DESC,name,version DESC", (user["id"],))
+                # domain_count/indicator_count : nombre de domaines/indicateurs ACTIFS,
+                # calculé depuis les données réelles pour que l'accueil et "Voir tous
+                # les modèles" affichent la structure de chaque questionnaire (ex :
+                # "7 domaines x 10 indicateurs") sans rien coder en dur (mission :8810).
+                for t in tpl_rows:
+                    t["domain_count"], t["indicator_count"] = template_domain_indicator_counts(db, t["id"])
+                return self.json(200, tpl_rows)
             if path == "/api/templates/matrix.xlsx":
                 data=blank_matrix_xlsx(); name=export_filename("matrice-questionnaire-vierge", ext="xlsx"); self.send_response(200); self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); self.send_header("Content-Disposition",f"attachment; filename={name}"); self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
             if path.startswith("/api/templates/") and path.endswith("/matrix.xlsx"):
@@ -2205,9 +2266,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"add")
                 iid=str(uuid.uuid4()); db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(iid,did,data.get("code") or "indicator-"+uuid.uuid4().hex[:8],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder") or next_order(db,"indicators","domain_id",did)),int(data.get("active",True)),json.dumps(data.get("configuration",{})))); db.commit(); return self.json(201,{"id":iid})
             if path == "/api/sessions":
-                template = template_payload(db, data["templateId"])
-                if not template or not any(d["active"] and any(i["active"] for i in d["indicators"]) for d in template["domains"]): return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
-                sid = str(uuid.uuid4()); db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, template["id"], template["version"], data["name"], data.get("organization", ""), data.get("location", ""), data.get("date", ""), "open", now(), None, data.get("description", ""), int(data["expectedParticipants"]) if data.get("expectedParticipants") not in (None, "") else None, user["id"])); db.commit(); return self.json(201, {"id": sid})
+                sid = create_session(db, user["id"], data)
+                if sid is None: return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
+                return self.json(201, {"id": sid})
             if path.endswith("/participants"):
                 sid = path.split("/")[3]; session = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
                 if not session or session["status"] != "open": return self.json(409, {"error": "Collecte fermée"})
@@ -2275,16 +2336,7 @@ class Handler(SimpleHTTPRequestHandler):
                     db.execute("UPDATE sessions SET name=?,organization=?,location=?,date=?,description=?,expected_participants=? WHERE id=?",(data["name"],data.get("organization",''),data.get("location",''),data.get("date",''),data.get("description",''),expected,sid))
                 db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/participants/"):
-                pid=path.split("/")[3]
-                field_map={"displayName":"display_name","anonymous":"anonymous","participantType":"participant_type","profile":"profile","sex":"sex","ageRange":"age_range","educationLevel":"education_level"}
-                sets,vals=[],[]
-                for key,col in field_map.items():
-                    if key in data:
-                        v=data[key]
-                        v=(1 if v else 0) if key=="anonymous" else (v or None)
-                        sets.append(f"{col}=?"); vals.append(v)
-                if sets:
-                    vals.append(pid); db.execute(f"UPDATE participants SET {','.join(sets)} WHERE id=?",vals); db.commit()
+                update_participant_profile_fields(db, path.split("/")[3], data)
                 return self.json(200,{"ok":True})
             if path.startswith("/api/priority-analyses/"):
                 db.execute("UPDATE priority_analyses SET problem=?,updated_at=? WHERE id=?",(data.get("problem",""),now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})

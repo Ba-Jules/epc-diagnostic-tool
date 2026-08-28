@@ -532,4 +532,101 @@ class EngineTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    # --- Mission :8810 (petites améliorations demandées par Mouhamed BA, consignes_claude.txt) ---
+
+    def test_template_domain_indicator_counts_computed_from_data_for_canonical(self):
+        # Point A : jamais code en dur - recalcule depuis domains/indicators actifs.
+        # Utilisee par /api/templates pour l'accueil ET "Voir tous les modeles" (meme
+        # fonction, donc meme information dans les deux ecrans).
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain_count, indicator_count = app.template_domain_indicator_counts(db, canonical)
+        self.assertEqual(domain_count, 7)
+        self.assertEqual(indicator_count, 70)
+
+    def test_template_domain_indicator_counts_for_epc_35_matches_its_own_structure(self):
+        db = self.db
+        epc35 = db.execute('select id from templates where name=?', (app.EPC_35_TEMPLATE_NAME,)).fetchone()['id']
+        domain_count, indicator_count = app.template_domain_indicator_counts(db, epc35)
+        self.assertEqual(domain_count, 7)
+        self.assertEqual(indicator_count, 35)
+
+    def test_template_domain_indicator_counts_ignores_inactive_domains_and_indicators(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        fork = app.clone_template(db, canonical, status='session_locked')
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (fork,)).fetchone()['id']
+        indicator = db.execute('select id from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['id']
+        db.execute('update indicators set active=0 where id=?', (indicator,)); db.commit()
+        domain_count, indicator_count = app.template_domain_indicator_counts(db, fork)
+        self.assertEqual(domain_count, 7)
+        self.assertEqual(indicator_count, 69)
+
+    def test_create_session_uses_existing_template_never_creates_one(self):
+        # Point B : le bouton "Nouveau diagnostic" cree une mission/atelier a partir
+        # d'un questionnaire deja existant - il ne cree jamais de nouveau
+        # questionnaire. "Créer le questionnaire" aurait donc ete trompeur.
+        db = self.db
+        canonical = db.execute('select id,version from templates where is_canonical=1').fetchone()
+        templates_before = db.execute('select count(*) from templates').fetchone()[0]
+        sid = app.create_session(db, 'owner-1', {'name': 'Mission test', 'templateId': canonical['id']})
+        self.assertIsNotNone(sid)
+        templates_after = db.execute('select count(*) from templates').fetchone()[0]
+        self.assertEqual(templates_before, templates_after)
+        session = db.execute('select template_id,template_version,owner_user_id from sessions where id=?', (sid,)).fetchone()
+        self.assertEqual(session['template_id'], canonical['id'])
+        self.assertEqual(session['template_version'], canonical['version'])
+        self.assertEqual(session['owner_user_id'], 'owner-1')
+
+    def test_create_session_refuses_a_template_with_no_active_question(self):
+        db = self.db
+        tid = app.create_blank_template(db, {'name': 'Vide'})
+        db.commit()
+        sessions_before = db.execute('select count(*) from sessions').fetchone()[0]
+        sid = app.create_session(db, 'owner-1', {'name': 'Mission test', 'templateId': tid})
+        self.assertIsNone(sid)
+        sessions_after = db.execute('select count(*) from sessions').fetchone()[0]
+        self.assertEqual(sessions_before, sessions_after)
+
+    def test_education_level_other_saved_and_autre_stays_the_statistical_category(self):
+        # Points C.4-C.7 : "Préciser" est sauvegardé séparément, "Autre" reste
+        # inchangée comme seule catégorie statistique (jamais remplacée par le texte).
+        db = self.db
+        self._mk_session('sess-edu'); self._mk_participant('sess-edu', 'p1')
+        app.update_participant_profile_fields(db, 'p1', {'educationLevel': 'Autre', 'educationLevelOther': 'BTS'})
+        row = db.execute('select education_level,education_level_other from participants where id=?', ('p1',)).fetchone()
+        self.assertEqual(row['education_level'], 'Autre')
+        self.assertEqual(row['education_level_other'], 'BTS')
+
+    def test_education_level_other_stays_empty_for_a_regular_level(self):
+        db = self.db
+        self._mk_session('sess-edu2'); self._mk_participant('sess-edu2', 'p1')
+        app.update_participant_profile_fields(db, 'p1', {'educationLevel': 'Licence'})
+        row = db.execute('select education_level,education_level_other from participants where id=?', ('p1',)).fetchone()
+        self.assertEqual(row['education_level'], 'Licence')
+        self.assertIsNone(row['education_level_other'])
+
+    def test_education_level_other_is_included_in_the_participant_row_for_resume(self):
+        # /api/participant renvoie dict(participant) tel quel : la précision doit donc
+        # être restaurée automatiquement à la reprise sans route dédiée.
+        db = self.db
+        self._mk_session('sess-edu3'); self._mk_participant('sess-edu3', 'p1')
+        app.update_participant_profile_fields(db, 'p1', {'educationLevel': 'Autre', 'educationLevelOther': 'BTS'})
+        participant = dict(db.execute('select * from participants where id=?', ('p1',)).fetchone())
+        self.assertIn('education_level_other', participant)
+        self.assertEqual(participant['education_level_other'], 'BTS')
+
+    def test_update_participant_profile_fields_is_additive_and_partial(self):
+        # Régression pour l'extraction de update_participant_profile_fields : mettre à
+        # jour un seul champ ne doit jamais effacer les autres déjà enregistrés.
+        db = self.db
+        self._mk_session('sess-edu4'); self._mk_participant('sess-edu4', 'p1')
+        app.update_participant_profile_fields(db, 'p1', {'sex': 'Femme', 'ageRange': '25–39 ans'})
+        app.update_participant_profile_fields(db, 'p1', {'educationLevel': 'Autre', 'educationLevelOther': 'BTS'})
+        row = db.execute('select sex,age_range,education_level,education_level_other from participants where id=?', ('p1',)).fetchone()
+        self.assertEqual(row['sex'], 'Femme')
+        self.assertEqual(row['age_range'], '25–39 ans')
+        self.assertEqual(row['education_level'], 'Autre')
+        self.assertEqual(row['education_level_other'], 'BTS')
+
 if __name__=='__main__': unittest.main()
