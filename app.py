@@ -767,8 +767,23 @@ PARTICIPANT_PROFILE_FIELD_MAP = {"displayName": "display_name", "anonymous": "an
     "educationLevelOther": "education_level_other"}
 
 
+def indicator_code_conflicts(db: sqlite3.Connection, domain_id: str, code: str, exclude_id: str | None = None) -> bool:
+    """Une "Référence" (indicators.code) dupliquée DANS LE MÊME DOMAINE crée une
+    ambiguïté réelle (mission :8810, audit du champ Référence) : deux colonnes
+    identiques dans l'export des réponses individuelles, et le même libellé sur les
+    histogrammes quand la référence est courte/alphabétique (pdf_short_label). Ce
+    n'est jamais un bug de calcul — chaque indicateur reste distinct par son id — mais
+    une confusion évitable pour l'utilisateur. Même périmètre (par domaine, pas
+    global) que le contrôle déjà appliqué à l'import XLSX (import_preview)."""
+    row = db.execute(
+        "SELECT 1 FROM indicators WHERE domain_id=? AND active=1 AND code=? AND id!=? LIMIT 1",
+        (domain_id, code, exclude_id or ""),
+    ).fetchone()
+    return row is not None
+
+
 def create_session(db: sqlite3.Connection, owner_user_id: str, data: dict):
-    """Le bouton "Nouveau diagnostic" ("Créer l'atelier") crée une MISSION/atelier
+    """Le bouton "Nouveau diagnostic" ("Créer la mission") crée une MISSION/atelier
     qui pointe vers un questionnaire déjà existant (data["templateId"], le canonique
     EPC/SENEVAL par défaut) — il ne crée jamais de nouveau questionnaire. Vérifié ici
     explicitement (mission :8810, point B : le libellé "Créer le questionnaire" aurait
@@ -2264,7 +2279,9 @@ class Handler(SimpleHTTPRequestHandler):
                 did=path.split("/")[3]
                 owner_domain=db.execute("SELECT template_id FROM domains WHERE id=?",(did,)).fetchone()
                 if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"add")
-                iid=str(uuid.uuid4()); db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(iid,did,data.get("code") or "indicator-"+uuid.uuid4().hex[:8],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder") or next_order(db,"indicators","domain_id",did)),int(data.get("active",True)),json.dumps(data.get("configuration",{})))); db.commit(); return self.json(201,{"id":iid})
+                code=(data.get("code") or "").strip()
+                if code and indicator_code_conflicts(db,did,code): return self.json(400,{"error":"Cette référence est déjà utilisée par une autre question de ce domaine."})
+                iid=str(uuid.uuid4()); db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)",(iid,did,code or "indicator-"+uuid.uuid4().hex[:8],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder") or next_order(db,"indicators","domain_id",did)),int(data.get("active",True)),json.dumps(data.get("configuration",{})))); db.commit(); return self.json(201,{"id":iid})
             if path == "/api/sessions":
                 sid = create_session(db, user["id"], data)
                 if sid is None: return self.json(400,{"error":"Impossible de créer une session : le questionnaire ne contient aucun domaine avec question."})
@@ -2368,6 +2385,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not (data.get("label") or "").strip(): return self.json(400,{"error":"La question est obligatoire."})
                 owner_domain=db.execute("SELECT d.template_id FROM indicators i JOIN domains d ON d.id=i.domain_id WHERE i.id=?",(iid,)).fetchone()
                 if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"edit")
+                if indicator_code_conflicts(db,data["domainId"],data["code"].strip(),exclude_id=iid): return self.json(400,{"error":"Cette référence est déjà utilisée par une autre question de ce domaine."})
                 db.execute("UPDATE indicators SET domain_id=?,code=?,label=?,description=?,response_type=?,required=?,display_order=?,active=?,configuration_json=? WHERE id=?",(data["domainId"],data["code"],data["label"],data.get("description",""),data.get("responseType","numeric"),int(data.get("required",True)),int(data.get("displayOrder",1)),int(data.get("active",True)),json.dumps(data.get("configuration",{})),iid)); db.commit(); return self.json(200,{"ok":True})
             return self.json(404,{"error":"Route inconnue"})
         except (KeyError, ValueError) as e: return self.json(400, {"error": f"Requête invalide : champ manquant ou incorrect ({e})."})

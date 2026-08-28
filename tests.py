@@ -629,4 +629,104 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(row['education_level'], 'Autre')
         self.assertEqual(row['education_level_other'], 'BTS')
 
+    # --- Mission :8810 (retour Mouhamed BA) : audit du champ "Référence" des indicateurs ---
+
+    def test_canonical_and_epc35_have_no_duplicate_reference_within_any_domain(self):
+        # Etat des lieux prealable a toute regle d'unicite : le referentiel reel
+        # (protege) n'a jamais eu de doublon de Reference dans un meme domaine.
+        for code, label, indicators in app.EPC_DOMAINS:
+            refs = [ref for ref, _ in indicators]
+            self.assertEqual(len(set(refs)), len(refs), f"doublon dans {code}")
+        for code, label, indicators in app.EPC_DOMAINS_5:
+            self.assertEqual(len(set(indicators)), len(indicators), f"doublon dans {code}")
+
+    def test_indicator_code_conflicts_detects_duplicate_within_same_domain(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        existing_code = db.execute('select code from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['code']
+        self.assertTrue(app.indicator_code_conflicts(db, domain, existing_code))
+
+    def test_indicator_code_conflicts_ignores_other_domains(self):
+        # Meme perimetre que le controle deja applique a l'import XLSX : par domaine,
+        # jamais global - reutiliser la meme Reference dans un AUTRE domaine est legitime.
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domains = db.execute('select id from domains where template_id=? order by display_order limit 2', (canonical,)).fetchall()
+        domain_a, domain_b = domains[0]['id'], domains[1]['id']
+        code_in_b = db.execute('select code from indicators where domain_id=? limit 1', (domain_b,)).fetchone()['code']
+        self.assertFalse(app.indicator_code_conflicts(db, domain_a, code_in_b))
+
+    def test_indicator_code_conflicts_excludes_self_when_editing(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        indicator = db.execute('select id,code from indicators where domain_id=? limit 1', (domain,)).fetchone()
+        self.assertFalse(app.indicator_code_conflicts(db, domain, indicator['code'], exclude_id=indicator['id']))
+
+    def test_indicator_code_conflicts_false_when_reference_is_unused(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        self.assertFalse(app.indicator_code_conflicts(db, domain, 'Reference totalement inedite'))
+
+    def test_display_order_not_code_determines_indicator_order(self):
+        # Le champ qui pilote reellement l'ordre est display_order, jamais code -
+        # verifie en creant deux indicateurs avec la MEME reference et un display_order
+        # explicite, puis en confirmant que template_payload les restitue dans cet ordre.
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        iid_first = str(uuid.uuid4()); iid_second = str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid_second, domain, 'DUP', 'Deuxieme (display_order 21)', '', 'numeric', 1, 21, 1, '{}'))
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid_first, domain, 'DUP', 'Premiere (display_order 20)', '', 'numeric', 1, 20, 1, '{}'))
+        db.commit()
+        payload = app.template_payload(db, canonical)
+        dom = next(d for d in payload['domains'] if d['id'] == domain)
+        last_two = [i['id'] for i in dom['indicators'][-2:]]
+        self.assertEqual(last_two, [iid_first, iid_second])
+
+    def test_duplicate_reference_does_not_corrupt_results_but_shares_a_short_chart_label(self):
+        # Constat central de l'audit : un doublon de Reference n'altere JAMAIS les
+        # calculs (chaque indicateur reste distinct par son id), mais produit la meme
+        # etiquette sur les graphiques/histogrammes quand la reference est courte -
+        # une ambiguite d'affichage, jamais une erreur de calcul.
+        db = self.db
+        canonical = db.execute('select id,version from templates where is_canonical=1').fetchone()
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical['id'],)).fetchone()['id']
+        iid1, iid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid1, domain, 'DUP', 'Premiere question dupliquee', '', 'numeric', 1, 21, 1, '{}'))
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid2, domain, 'DUP', 'Deuxieme question dupliquee', '', 'numeric', 1, 22, 1, '{}'))
+        sid = 'sess-dup-reference'
+        self._mk_session(sid, template=canonical)
+        self._mk_participant(sid, 'p1', status='completed')
+        db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, 'p1', iid1, '5', 'numeric', app.now(), app.now()))
+        db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, 'p1', iid2, '1', 'numeric', app.now(), app.now()))
+        db.commit()
+        result = app.analysis(db, sid)
+        dom = next(d for d in result['domains'] if d['id'] == domain)
+        first, second = dom['indicators'][-2], dom['indicators'][-1]
+        # calculs corrects et distincts malgre la reference identique
+        self.assertEqual(first['capacity'], 100.0)
+        self.assertEqual(second['capacity'], 20.0)
+        # mais meme etiquette de graphique (ambiguite d'affichage documentee)
+        self.assertEqual(app.pdf_short_label(first), app.pdf_short_label(second))
+
+    def test_individual_responses_export_header_repeats_the_reference_on_duplicate(self):
+        # Justifie techniquement le refus des doublons a la creation/edition : sans
+        # cette regle, l'export "reponses individuelles" produirait deux colonnes
+        # portant exactement le meme intitule.
+        db = self.db
+        canonical = db.execute('select id,version from templates where is_canonical=1').fetchone()
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical['id'],)).fetchone()['id']
+        iid1, iid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid1, domain, 'DUP', 'Premiere question dupliquee', '', 'numeric', 1, 21, 1, '{}'))
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid2, domain, 'DUP', 'Deuxieme question dupliquee', '', 'numeric', 1, 22, 1, '{}'))
+        db.commit()
+        sid = 'sess-dup-export'
+        self._mk_session(sid, template=canonical)
+        data = app.individual_responses_rows(db, sid)
+        codes = [i['code'] for i in data['indicators']]
+        self.assertEqual(codes.count('DUP'), 2)
+
 if __name__=='__main__': unittest.main()
