@@ -782,6 +782,67 @@ def indicator_code_conflicts(db: sqlite3.Connection, domain_id: str, code: str, 
     return row is not None
 
 
+# Mots grammaticaux (articles/prépositions/pronoms) + verbes/adverbes génériques des
+# formulations EPC ("Nous offrons régulièrement...", "Il existe...") à retirer pour
+# proposer une Référence courte (mission :8810, demande Mouhamed BA). Best-effort
+# déterministe — jamais parfait, toujours corrigible par l'utilisateur avant
+# enregistrement (voir propose_indicator_reference).
+INDICATOR_REFERENCE_STOPWORDS = {
+    "nous", "notre", "nos", "vous", "vos", "votre", "leur", "leurs", "on", "il", "ils", "elle", "elles",
+    "le", "la", "les", "l", "de", "des", "du", "d", "et", "en", "au", "aux", "à", "a", "ce", "cet", "cette", "ces",
+    "un", "une", "pour", "que", "qui", "dans", "avec", "sur", "par", "est", "sont", "ont", "avons", "avez", "être", "avoir",
+    "tout", "tous", "toute", "toutes", "très", "plus", "moins", "bien", "mal", "comme",
+    "régulièrement", "systématiquement", "activement", "efficacement", "généralement", "directement",
+    "constamment", "correctement", "également", "notamment", "ainsi", "donc",
+    "offrons", "offre", "offrent", "utilisons", "utilise", "utilisent", "procédons", "modifions", "modifie",
+    "examinons", "examine", "engageons", "engage", "établissons", "établit", "disposons", "dispose",
+    "reconnaissons", "reconnait", "impliquons", "implique", "faisons", "fait", "accordons", "accorde",
+    "obtenons", "obtient", "participent", "participe", "contribuent", "contribue", "favorise", "favorisent",
+    "encourage", "encouragent", "améliore", "améliorent", "reflète", "reflètent", "montre", "montrent",
+    "permettent", "permet", "existe", "existent", "appropriée", "appropriées", "approprié", "appropriés",
+}
+
+
+def _significant_reference_words(label: str) -> list[str]:
+    words = re.findall(r"[A-Za-zÀ-ÿŒœÆæ]+(?:-[A-Za-zÀ-ÿŒœÆæ]+)*", (label or "").strip())
+    significant = [w for w in words if w.lower().strip("’'") not in INDICATOR_REFERENCE_STOPWORDS]
+    return significant or words
+
+
+def _reference_phrase(words: list[str]) -> str:
+    if not words:
+        return ""
+    phrase = " ".join(words)
+    return phrase[0].upper() + phrase[1:]
+
+
+def generate_indicator_reference(label: str) -> str:
+    """Propose une Référence courte (cible 3-4 mots) à partir de l'énoncé complet
+    d'un indicateur, sans dépendance à un service IA (mission :8810). Retire les
+    mots grammaticaux et les tournures génériques ("Nous offrons régulièrement..."),
+    garde les mots significatifs dans leur ordre d'apparition, et capitalise
+    uniquement la première lettre du résultat — jamais parfait, toujours modifiable
+    par l'utilisateur avant enregistrement (voir INDICATOR_REFERENCE_STOPWORDS)."""
+    return _reference_phrase(_significant_reference_words(label)[:4])
+
+
+def propose_indicator_reference(db: sqlite3.Connection, domain_id: str, label: str, exclude_id: str | None = None) -> str:
+    """Comme generate_indicator_reference, mais vérifie l'unicité dans le domaine
+    (règle conservée de la mission précédente) : si la proposition à 4 mots existe
+    déjà, tente une variante à 5 mots plutôt qu'un numéro incompréhensible ; si la
+    collision persiste, retourne la proposition de base — l'enregistrement refusera
+    alors le doublon et invitera l'utilisateur à la différencier lui-même."""
+    words = _significant_reference_words(label)
+    base = _reference_phrase(words[:4])
+    if not base or not indicator_code_conflicts(db, domain_id, base, exclude_id=exclude_id):
+        return base
+    if len(words) > 4:
+        extended = _reference_phrase(words[:5])
+        if not indicator_code_conflicts(db, domain_id, extended, exclude_id=exclude_id):
+            return extended
+    return base
+
+
 def create_session(db: sqlite3.Connection, owner_user_id: str, data: dict):
     """Le bouton "Nouveau diagnostic" ("Créer la mission") crée une MISSION/atelier
     qui pointe vers un questionnaire déjà existant (data["templateId"], le canonique
@@ -1685,6 +1746,11 @@ def pdf_short_label(item):
     code = (item.get("code") or "").strip()
     if re.fullmatch(r"[A-Za-zÀ-ÿ]{2,10}", code):
         return code.upper()
+    if code:
+        # Référence courte d'un indicateur (ex. "Formation au personnel") : utilisée
+        # telle quelle en abscisse (mission :8810, demande Mouhamed BA), au lieu de
+        # l'abréviation calculée ci-dessous à partir de l'énoncé complet.
+        return code
     label = (item.get("label") or "").strip()
     words = [w for w in label.split() if w and w.lower().replace("’", "").replace("'", "") not in PDF_STOPWORDS]
     if not words:

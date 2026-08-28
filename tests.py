@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import uuid
 import unittest
@@ -728,5 +729,115 @@ class EngineTests(unittest.TestCase):
         data = app.individual_responses_rows(db, sid)
         codes = [i['code'] for i in data['indicators']]
         self.assertEqual(codes.count('DUP'), 2)
+
+    # --- Mission :8810 (référence courte automatique des indicateurs) ---
+
+    def test_A_generated_reference_is_short_and_relevant(self):
+        proposal = app.generate_indicator_reference('Nous offrons régulièrement la formation au personnel')
+        words = proposal.split()
+        self.assertTrue(1 <= len(words) <= 4)
+        self.assertNotIn('nous', [w.lower() for w in words])
+        self.assertNotIn('offrons', [w.lower() for w in words])
+        self.assertIn('formation', [w.lower() for w in words])
+        self.assertIn('personnel', [w.lower() for w in words])
+
+    def test_C_manually_chosen_reference_is_not_overwritten_by_generation(self):
+        # La génération est une PROPOSITION jamais imposée : un code choisi à la main,
+        # même très différent de ce que generate_indicator_reference aurait produit,
+        # doit être conservé tel quel a l'enregistrement.
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        label = 'Nous offrons régulièrement la formation au personnel'
+        manual_code = 'Choix libre du pilote'
+        self.assertNotEqual(app.generate_indicator_reference(label), manual_code)
+        iid = str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid, domain, manual_code, label, '', 'numeric', 1, 99, 1, '{}'))
+        db.commit()
+        stored = db.execute('select code from indicators where id=?', (iid,)).fetchone()['code']
+        self.assertEqual(stored, manual_code)
+
+    def test_D_regeneration_is_deterministic_and_repeatable(self):
+        label = 'Nous offrons régulièrement la formation au personnel'
+        self.assertEqual(app.generate_indicator_reference(label), app.generate_indicator_reference(label))
+
+    def test_E_colliding_proposal_in_same_domain_produces_a_variant_or_is_flagged(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        label_a = 'Nous offrons régulièrement la formation au personnel'
+        base = app.generate_indicator_reference(label_a)
+        iid1 = str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid1, domain, base, label_a, '', 'numeric', 1, 98, 1, '{}'))
+        db.commit()
+        # Un second énoncé qui génère spontanément la MÊME proposition de base doit
+        # obtenir une variante différente (jamais un numéro incompréhensible), ou à
+        # défaut la base elle-même — mais alors le doublon reste détectable et refusé
+        # par indicator_code_conflicts avant tout enregistrement.
+        label_b = label_a + ' chaque trimestre'
+        proposal_b = app.propose_indicator_reference(db, domain, label_b)
+        self.assertFalse(re.search(r'\d', proposal_b), "jamais de numero incomprehensible")
+        if proposal_b == base:
+            self.assertTrue(app.indicator_code_conflicts(db, domain, proposal_b))
+        else:
+            self.assertFalse(app.indicator_code_conflicts(db, domain, proposal_b))
+
+    def test_F_same_proposal_across_two_domains_is_allowed(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domains = db.execute('select id from domains where template_id=? order by display_order limit 2', (canonical,)).fetchall()
+        domain_a, domain_b = domains[0]['id'], domains[1]['id']
+        label = 'Nous offrons régulièrement la formation au personnel'
+        base = app.generate_indicator_reference(label)
+        iid1 = str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid1, domain_a, base, label, '', 'numeric', 1, 97, 1, '{}'))
+        db.commit()
+        # Le même énoncé dans un AUTRE domaine ne doit jamais être transformé en
+        # variante artificielle : rien n'empêche la même référence courte ailleurs.
+        proposal_b = app.propose_indicator_reference(db, domain_b, label)
+        self.assertEqual(proposal_b, base)
+        self.assertFalse(app.indicator_code_conflicts(db, domain_b, proposal_b))
+
+    def test_G_histogram_label_uses_the_short_reference_not_an_abbreviation(self):
+        item = {'code': 'Formation au personnel', 'label': 'Nous offrons régulièrement la formation au personnel'}
+        self.assertEqual(app.pdf_short_label(item), 'Formation au personnel')
+
+    def test_H_full_statement_stays_available_alongside_the_short_reference(self):
+        # pdf_short_label() ne modifie jamais item['label'] : l'énoncé complet reste
+        # lisible en tooltip/détail à côté de l'étiquette courte utilisée en abscisse.
+        item = {'code': 'Formation au personnel', 'label': 'Nous offrons régulièrement la formation au personnel'}
+        app.pdf_short_label(item)
+        self.assertEqual(item['label'], 'Nous offrons régulièrement la formation au personnel')
+
+    def test_I_short_label_identical_in_standard_and_graded_mode(self):
+        # pdf_short_label() ne lit que code/label, jamais les champs de capacité -
+        # le mode standardisé/gradué ne peut donc jamais changer l'étiquette.
+        item_standard = {'code': 'Formation au personnel', 'label': 'Énoncé complet', 'capacity': 80, 'consensus': 70}
+        item_graded = {'code': 'Formation au personnel', 'label': 'Énoncé complet', 'gradedCapacity': 75, 'gradedConsensus': 60}
+        self.assertEqual(app.pdf_short_label(item_standard), app.pdf_short_label(item_graded))
+
+    def test_J_indicator_creation_logic_works_without_any_ai_configuration(self):
+        db = self.db
+        row = db.execute('select enabled from ai_config where id=1').fetchone()
+        self.assertTrue(row is None or not row['enabled'])
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (canonical,)).fetchone()['id']
+        label = 'Nous offrons régulièrement la formation au personnel'
+        proposal = app.propose_indicator_reference(db, domain, label)
+        self.assertTrue(proposal)
+        iid = str(uuid.uuid4())
+        db.execute('INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)', (iid, domain, proposal, label, '', 'numeric', 1, 96, 1, '{}'))
+        db.commit()
+        self.assertEqual(db.execute('select code from indicators where id=?', (iid,)).fetchone()['code'], proposal)
+
+    def test_K_canonical_references_are_untouched_by_the_new_generation_feature(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        payload = app.template_payload(db, canonical)
+        self.assertEqual(len(payload['domains']), 7)
+        self.assertEqual(sum(len(d['indicators']) for d in payload['domains']), 70)
+        by_domain = {d['code']: [i['code'] for i in d['indicators']] for d in payload['domains']}
+        for domain_code, label, indicators in app.EPC_DOMAINS:
+            self.assertEqual(by_domain[domain_code], [ref for ref, _ in indicators])
 
 if __name__=='__main__': unittest.main()
