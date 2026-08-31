@@ -1,0 +1,298 @@
+MISSION :8810 — RÉFÉRENCE COURTE AUTOMATIQUE DES INDICATEURS
+
+Travaille EXCLUSIVEMENT sur :
+- branche stable-simple
+- instance :8810
+
+Ne touche pas à :
+- :8800
+- :8820
+- leurs branches
+- données réelles/historiques
+
+Avant toute modification :
+- vérifier branche et git status ;
+- vérifier working tree propre ;
+- exécuter les tests de référence.
+
+CONTEXTE
+
+Mouhamed BA a compris que "Référence" est un libellé métier court de l'indicateur, indépendant de son ordre.
+
+Il précise maintenant son besoin :
+
+1. la Référence doit être courte ;
+2. idéalement 3 à 4 mots ;
+3. elle doit synthétiser l'indicateur avec concision, clarté, précision et pertinence ;
+4. elle doit être générée automatiquement lors de la création/modification d'un indicateur ;
+5. elle doit servir de libellé sous les histogrammes, en abscisse ;
+6. l'utilisateur doit pouvoir la corriger si nécessaire.
+
+==================================================
+1. AUDIT AVANT MODIFICATION
+==================================================
+
+Vérifier précisément tous les usages actuels de indicators.code / Référence dans :8810.
+
+Identifier notamment :
+- histogrammes par indicateur ;
+- graphiques par domaine ;
+- autres graphiques utilisant des indicateurs ;
+- tableaux ;
+- exports XLSX/CSV ;
+- rapports.
+
+Pour chaque graphique comportant des indicateurs en abscisse, vérifier quel texte est actuellement utilisé :
+- Référence ;
+- énoncé complet ;
+- fallback conditionnel ;
+- autre.
+
+Objectif métier à appliquer :
+pour un graphique par indicateur, le libellé principal en abscisse doit être la Référence courte.
+
+Conserver si utile l'énoncé complet dans un tooltip/détail, mais pas comme longue étiquette d'abscisse.
+
+==================================================
+2. GÉNÉRATION AUTOMATIQUE DE LA RÉFÉRENCE
+==================================================
+
+Lors de la création d'un indicateur :
+
+l'utilisateur saisit d'abord son énoncé.
+
+À partir de cet énoncé, proposer automatiquement une Référence courte.
+
+Cible :
+3 à 4 mots de préférence.
+
+Qualités attendues :
+- concise ;
+- claire ;
+- précise ;
+- pertinente ;
+- compréhensible hors contexte ;
+- représentative de l'idée principale ;
+- sans formulation inutile du type "Nous avons", "Il existe", etc.
+
+Exemple :
+
+Indicateur :
+"Nous offrons régulièrement la formation au personnel"
+
+Référence possible :
+"Formation du personnel"
+
+IMPORTANT :
+la Référence générée reste MODIFIABLE par l'utilisateur avant enregistrement.
+
+==================================================
+3. NE PAS RENDRE L'OUTIL DÉPENDANT DE L'IA
+==================================================
+
+La création/modification d'un indicateur doit continuer à fonctionner :
+- sans connexion à un service IA ;
+- si l'IA est indisponible ;
+- si aucune clé/API n'est configurée.
+
+Examiner l'infrastructure IA déjà présente dans :8810.
+
+Si une fonction IA existante permet proprement de proposer cette synthèse, elle peut être utilisée comme amélioration facultative.
+
+Mais prévoir obligatoirement un fallback local/déterministe permettant de proposer une référence courte sans appel IA.
+
+Ne crée pas une nouvelle dépendance externe uniquement pour cette fonction.
+
+==================================================
+4. COMPORTEMENT DE L'INTERFACE
+==================================================
+
+Flux souhaité :
+
+Énoncé de l'indicateur
+→ Référence proposée automatiquement
+→ utilisateur peut conserver ou modifier
+→ Enregistrer.
+
+La Référence doit rester visible dans le formulaire.
+
+Prévoir un petit bouton/action du type :
+
+"Regénérer"
+
+ou équivalent sobre, permettant de refaire une proposition à partir de l'énoncé courant.
+
+Ne pas écraser silencieusement une Référence que l'utilisateur a volontairement modifiée.
+
+Si l'utilisateur modifie ensuite l'énoncé :
+- ne pas remplacer automatiquement une Référence personnalisée sans son accord ;
+- permettre de demander explicitement une nouvelle proposition.
+
+==================================================
+5. UNICITÉ
+==================================================
+
+Conserver la règle ajoutée précédemment :
+
+deux indicateurs d'un même domaine ne peuvent pas avoir exactement la même Référence.
+
+Lors de la génération automatique :
+- vérifier l'unicité dans le domaine ;
+- si la proposition existe déjà, produire si possible une variante pertinente ;
+- sinon demander à l'utilisateur de la différencier.
+
+Ne jamais ajouter artificiellement un numéro incompréhensible uniquement pour contourner le contrôle.
+
+==================================================
+6. LONGUEUR
+==================================================
+
+3 à 4 mots = cible ergonomique, pas règle destructrice absolue.
+
+Ne tronque jamais brutalement une Référence existante.
+
+Pour les nouvelles propositions automatiques :
+viser 3–4 mots.
+
+Si 5 mots sont exceptionnellement nécessaires pour préserver le sens, préférer une référence claire à une règle mécanique.
+
+==================================================
+7. HISTOGRAMMES
+==================================================
+
+C'est un point explicitement demandé par Mouhamed BA.
+
+Pour TOUS les histogrammes/graphiques où les indicateurs apparaissent en abscisse :
+
+afficher la Référence courte.
+
+Exemple :
+
+"Formation du personnel"
+
+et non :
+
+"Nous offrons régulièrement la formation au personnel"
+
+Si l'interface le permet proprement :
+- Référence = étiquette courte visible ;
+- énoncé complet = tooltip/détail au survol.
+
+Vérifier également :
+- lisibilité avec plusieurs indicateurs ;
+- absence de chevauchement excessif ;
+- cohérence après changement de domaine ;
+- cohérence standardisé/gradué.
+
+==================================================
+8. DONNÉES EXISTANTES
+==================================================
+
+NE PAS régénérer automatiquement les références des 70 indicateurs EPC/SENEVAL existants.
+
+NE PAS modifier leurs références actuelles dans cette mission.
+
+La nouvelle génération automatique concerne :
+- nouveaux indicateurs ;
+- éventuellement indicateur existant uniquement lorsque l'utilisateur demande explicitement "Regénérer".
+
+Aucune migration destructive.
+
+==================================================
+9. TESTS
+==================================================
+
+Créer uniquement des données TEST.
+
+Tester au minimum :
+
+A.
+Énoncé :
+"Nous offrons régulièrement la formation au personnel"
+
+→ proposition courte et pertinente.
+
+B.
+Référence proposée modifiable manuellement.
+
+C.
+Modification manuelle conservée lors de l'enregistrement.
+
+D.
+Regénération explicite fonctionnelle.
+
+E.
+Deux propositions identiques dans le même domaine :
+→ doublon refusé/géré proprement.
+
+F.
+Même Référence dans deux domaines différents :
+→ autorisée si c'est bien la règle actuelle.
+
+G.
+Histogramme :
+→ Référence courte en abscisse.
+
+H.
+Tooltip/détail :
+→ énoncé complet disponible si prévu.
+
+I.
+Mode standardisé et gradué :
+→ mêmes références courtes.
+
+J.
+Absence/indisponibilité IA :
+→ création d'indicateur toujours fonctionnelle.
+
+K.
+Canonique :
+→ toujours 7 domaines / 70 indicateurs, références historiques inchangées.
+
+Exécuter toute la suite automatisée.
+
+==================================================
+10. DÉPLOIEMENT
+==================================================
+
+Si tous les tests sont verts :
+
+- commit sur stable-simple ;
+- push origin/stable-simple ;
+- sauvegarde préalable de :8810 ;
+- déployer uniquement :8810 ;
+- recette navigateur réelle.
+
+Vérifier :
+:8810 HTTP 200
+:8800 HTTP 200
+:8820 HTTP 200
+
+Nettoyer toutes les données TEST.
+
+==================================================
+11. RAPPORT FINAL
+==================================================
+
+Répondre uniquement :
+
+- rôle Référence inchangé : OUI/NON
+- génération automatique : OK/NOK
+- cible 3–4 mots : OK/NOK
+- génération sans IA : OK/NOK
+- Référence modifiable manuellement : OK/NOK
+- Regénérer explicitement : OK/NOK
+- modification manuelle protégée contre écrasement : OK/NOK
+- unicité dans le domaine : OK/NOK
+- histogrammes utilisent Référence en abscisse : OK/NOK
+- énoncé complet accessible en complément : OK/NOK
+- standardisé/gradué : OK/NOK
+- références historiques inchangées : OUI/NON
+- canonique : X domaines / X indicateurs
+- tests : X/X
+- commit :
+- :8810 HTTP :
+- :8800 intacte : OUI/NON
+- :8820 intacte : OUI/NON
+- données TEST nettoyées : OUI/NON
+- blocage éventuel :

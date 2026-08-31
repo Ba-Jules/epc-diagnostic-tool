@@ -26,6 +26,7 @@ diagnostic*.pdf
 Thumbs.db
 .vscode/
 .idea/
+.claude/
 
 # Temporary code-generation artifacts
 gemini-code-*
