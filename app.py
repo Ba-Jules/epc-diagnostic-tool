@@ -490,6 +490,11 @@ def init_schema(db: sqlite3.Connection) -> None:
             legacy = db.execute("SELECT id FROM templates WHERE name='EPC / SENEVAL' ORDER BY version ASC LIMIT 1").fetchone()
             if legacy:
                 db.execute("UPDATE templates SET is_canonical=1 WHERE id=?", (legacy["id"],))
+    if "intro" not in template_columns:
+        # Champ facultatif "Introduction" du questionnaire (mission :8810, second
+        # retour de Mouhamed BA) : additif, jamais rempli automatiquement pour les
+        # questionnaires existants — voir INTRO_MAX_WORDS / validate_intro_word_count.
+        db.execute("ALTER TABLE templates ADD COLUMN intro TEXT")
     db.commit()
     if db.execute("SELECT 1 FROM templates LIMIT 1").fetchone() is None:
         seed_epc(db)
@@ -644,7 +649,7 @@ def seed_epc(db: sqlite3.Connection) -> str:
     scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None, 1))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None, 1, None))
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS, 1):
         did = str(uuid.uuid4())
         db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, code, label, "", d_order, 1))
@@ -733,7 +738,7 @@ def ensure_epc_35_template(db: sqlite3.Connection) -> None:
     scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, EPC_35_TEMPLATE_NAME, 1, "Questionnaire réduit fourni par le pilote (7 domaines x 5 indicateurs).", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, owner_user_id, 0))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, EPC_35_TEMPLATE_NAME, 1, "Questionnaire réduit fourni par le pilote (7 domaines x 5 indicateurs).", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, owner_user_id, 0, None))
     order_num = 1
     for d_order, (code, label, indicators) in enumerate(EPC_DOMAINS_5, 1):
         did = str(uuid.uuid4())
@@ -816,28 +821,33 @@ def _reference_phrase(words: list[str]) -> str:
     return phrase[0].upper() + phrase[1:]
 
 
+INDICATOR_REFERENCE_MAX_WORDS = 2
+
+
 def generate_indicator_reference(label: str) -> str:
-    """Propose une Référence courte (cible 3-4 mots) à partir de l'énoncé complet
-    d'un indicateur, sans dépendance à un service IA (mission :8810). Retire les
-    mots grammaticaux et les tournures génériques ("Nous offrons régulièrement..."),
-    garde les mots significatifs dans leur ordre d'apparition, et capitalise
-    uniquement la première lettre du résultat — jamais parfait, toujours modifiable
-    par l'utilisateur avant enregistrement (voir INDICATOR_REFERENCE_STOPWORDS)."""
-    return _reference_phrase(_significant_reference_words(label)[:4])
+    """Propose une Référence courte (cible MAXIMUM 2 mots, mission :8810, second
+    retour de Mouhamed BA — les histogrammes restaient trop chargés à 3-4 mots) à
+    partir de l'énoncé complet d'un indicateur, sans dépendance à un service IA.
+    Retire les mots grammaticaux et les tournures génériques ("Nous offrons
+    régulièrement..."), garde les mots significatifs dans leur ordre d'apparition,
+    et capitalise uniquement la première lettre du résultat — jamais parfait,
+    toujours modifiable par l'utilisateur avant enregistrement (voir
+    INDICATOR_REFERENCE_STOPWORDS)."""
+    return _reference_phrase(_significant_reference_words(label)[:INDICATOR_REFERENCE_MAX_WORDS])
 
 
 def propose_indicator_reference(db: sqlite3.Connection, domain_id: str, label: str, exclude_id: str | None = None) -> str:
     """Comme generate_indicator_reference, mais vérifie l'unicité dans le domaine
-    (règle conservée de la mission précédente) : si la proposition à 4 mots existe
-    déjà, tente une variante à 5 mots plutôt qu'un numéro incompréhensible ; si la
+    (règle conservée de la mission précédente) : si la proposition à 2 mots existe
+    déjà, tente une variante à 3 mots plutôt qu'un numéro incompréhensible ; si la
     collision persiste, retourne la proposition de base — l'enregistrement refusera
     alors le doublon et invitera l'utilisateur à la différencier lui-même."""
     words = _significant_reference_words(label)
-    base = _reference_phrase(words[:4])
+    base = _reference_phrase(words[:INDICATOR_REFERENCE_MAX_WORDS])
     if not base or not indicator_code_conflicts(db, domain_id, base, exclude_id=exclude_id):
         return base
-    if len(words) > 4:
-        extended = _reference_phrase(words[:5])
+    if len(words) > INDICATOR_REFERENCE_MAX_WORDS:
+        extended = _reference_phrase(words[:INDICATOR_REFERENCE_MAX_WORDS + 1])
         if not indicator_code_conflicts(db, domain_id, extended, exclude_id=exclude_id):
             return extended
     return base
@@ -908,7 +918,7 @@ def clone_template_with_mapping(db, template_id, name=None, status="active"):
     if not old: raise ValueError("Configuration introuvable")
     tid, stamp = str(uuid.uuid4()), now()
     version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?", (name or old["name"],)).fetchone()[0]
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], status, json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id"), 0))
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, name or old["name"], version, old["description"], status, json.dumps(old["scale"]), json.dumps(old["scoring"]), json.dumps(old["consensus"]), json.dumps(old["grading"]), json.dumps(old["priority"]), stamp, stamp, old.get("owner_user_id"), 0, old.get("intro")))
     domain_map, indicator_map = {}, {}
     for d in old["domains"]:
         new_did = str(uuid.uuid4()); domain_map[d["id"]] = new_did
@@ -1027,12 +1037,26 @@ def delete_session(db: sqlite3.Connection, sid: str) -> bool:
     return drop_template
 
 
+INTRO_MAX_WORDS = 60
+
+
+def validate_intro_word_count(intro: str | None) -> None:
+    """Le champ facultatif "Introduction" du questionnaire (mission :8810, sous
+    l'intitulé, avant l'échelle de notation) accepte au maximum 60 mots — vérifié
+    ici côté serveur en plus du compteur côté interface, jamais un simple troncage
+    silencieux."""
+    count = len((intro or "").split())
+    if count > INTRO_MAX_WORDS:
+        raise ValueError(f"L'introduction du questionnaire doit contenir au maximum {INTRO_MAX_WORDS} mots (actuellement {count}).")
+
+
 def create_blank_template(db, data, owner_user_id=None):
     tid, stamp = str(uuid.uuid4()), now(); name=data.get("name", "Nouveau questionnaire").strip()
     if not name: raise ValueError("Le nom est obligatoire")
+    validate_intro_word_count(data.get("intro"))
     version=db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?",(name,)).fetchone()[0]
     scale={"type":"numeric","min":1,"max":5,"labels":{}}
-    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id,0)); db.commit(); return tid
+    db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(tid,name,version,data.get("description", ""),"active",json.dumps(scale),json.dumps({"capacity":"mean_divided_by_scale_max","outputRange":[0,100]}),json.dumps({"method":"standard_deviation","normalization":"theoretical_range","factor":2}),json.dumps(GRADING),json.dumps({"maxPerDomain":3}),stamp,stamp,owner_user_id,0,data.get("intro"))); db.commit(); return tid
 
 
 def matrix_xlsx(template):
@@ -2435,11 +2459,12 @@ class Handler(SimpleHTTPRequestHandler):
                 db.execute("UPDATE training_topics SET priority_id=?,recommendation_id=?,title=?,need_text=?,target_audience=?,priority_level=?,comment=?,updated_at=? WHERE id=?",(data.get("priorityId") or None,data.get("recommendationId") or None,data["title"],data.get("needText") or None,data.get("targetAudience") or None,data.get("priorityLevel","Non définie"),data.get("comment") or None,now(),path.split("/")[3])); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/templates/"):
                 tid=path.split("/")[3]; guard_structural_edit(db,tid,"edit")
+                if "intro" in data: validate_intro_word_count(data.get("intro"))
                 tpl_status=db.execute("SELECT status FROM templates WHERE id=?",(tid,)).fetchone()["status"]
                 used=db.execute("SELECT 1 FROM sessions WHERE template_id=? LIMIT 1",(tid,)).fetchone()
                 if used and tpl_status != "session_locked":
                     tid=clone_template(db,tid); data["versionCreated"]=True
-                old=template_payload(db,tid); scale=data.get("scale",old["scale"]); db.execute("UPDATE templates SET name=?,description=?,scale_json=?,priority_json=?,updated_at=? WHERE id=?",(data.get("name",old["name"]),data.get("description",old["description"]),json.dumps(scale),json.dumps(data.get("priority",old["priority"])),now(),tid)); db.commit(); return self.json(200,{"id":tid,"versionCreated":data.get("versionCreated",False)})
+                old=template_payload(db,tid); scale=data.get("scale",old["scale"]); db.execute("UPDATE templates SET name=?,description=?,intro=?,scale_json=?,priority_json=?,updated_at=? WHERE id=?",(data.get("name",old["name"]),data.get("description",old["description"]),data.get("intro",old["intro"]),json.dumps(scale),json.dumps(data.get("priority",old["priority"])),now(),tid)); db.commit(); return self.json(200,{"id":tid,"versionCreated":data.get("versionCreated",False)})
             if path.startswith("/api/domains/"):
                 did=path.split("/")[3]
                 owner_domain=db.execute("SELECT template_id FROM domains WHERE id=?",(did,)).fetchone()

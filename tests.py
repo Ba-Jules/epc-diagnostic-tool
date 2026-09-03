@@ -735,11 +735,21 @@ class EngineTests(unittest.TestCase):
     def test_A_generated_reference_is_short_and_relevant(self):
         proposal = app.generate_indicator_reference('Nous offrons régulièrement la formation au personnel')
         words = proposal.split()
-        self.assertTrue(1 <= len(words) <= 4)
+        self.assertTrue(1 <= len(words) <= 2)
         self.assertNotIn('nous', [w.lower() for w in words])
         self.assertNotIn('offrons', [w.lower() for w in words])
         self.assertIn('formation', [w.lower() for w in words])
         self.assertIn('personnel', [w.lower() for w in words])
+
+    def test_A2_generated_reference_truncates_to_two_words_even_with_more_significant_words(self):
+        # Second retour de Mouhamed BA (mission :8810) : la cible passe de 3-4 à
+        # MAXIMUM 2 mots. Cet énoncé a délibérément plus de 2 mots significatifs
+        # ("plan", "formation", "continue", "personnel", "technique") pour vérifier
+        # que seuls les 2 premiers sont retenus.
+        proposal = app.generate_indicator_reference('Nous établissons un plan de formation continue du personnel technique')
+        words = proposal.split()
+        self.assertEqual(len(words), 2)
+        self.assertEqual([w.lower() for w in words], ['plan', 'formation'])
 
     def test_C_manually_chosen_reference_is_not_overwritten_by_generation(self):
         # La génération est une PROPOSITION jamais imposée : un code choisi à la main,
@@ -839,5 +849,46 @@ class EngineTests(unittest.TestCase):
         by_domain = {d['code']: [i['code'] for i in d['indicators']] for d in payload['domains']}
         for domain_code, label, indicators in app.EPC_DOMAINS:
             self.assertEqual(by_domain[domain_code], [ref for ref, _ in indicators])
+
+    # --- Mission :8810 (introduction facultative du questionnaire, second retour) ---
+
+    def test_L_intro_is_empty_by_default_and_untouched_on_canonical(self):
+        db = self.db
+        canonical = db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        payload = app.template_payload(db, canonical)
+        self.assertFalse(payload.get('intro'))
+
+    def test_M_create_blank_template_persists_intro(self):
+        db = self.db
+        text = "Ce diagnostic évalue la maturité organisationnelle de la structure."
+        tid = app.create_blank_template(db, {'name': 'Modele intro', 'intro': text})
+        payload = app.template_payload(db, tid)
+        self.assertEqual(payload['intro'], text)
+
+    def test_N_intro_can_stay_completely_empty(self):
+        db = self.db
+        tid = app.create_blank_template(db, {'name': 'Modele sans intro'})
+        payload = app.template_payload(db, tid)
+        self.assertFalse(payload.get('intro'))
+
+    def test_O_intro_over_60_words_is_rejected(self):
+        long_intro = ' '.join(['mot'] * 61)
+        with self.assertRaises(ValueError):
+            app.validate_intro_word_count(long_intro)
+        with self.assertRaises(ValueError):
+            app.create_blank_template(self.db, {'name': 'Trop long', 'intro': long_intro})
+
+    def test_P_intro_of_exactly_60_words_is_accepted(self):
+        ok_intro = ' '.join(['mot'] * 60)
+        app.validate_intro_word_count(ok_intro)
+        tid = app.create_blank_template(self.db, {'name': 'Soixante mots', 'intro': ok_intro})
+        self.assertEqual(app.template_payload(self.db, tid)['intro'], ok_intro)
+
+    def test_Q_intro_survives_clone(self):
+        db = self.db
+        text = 'Introduction courte pour vérifier la duplication.'
+        tid = app.create_blank_template(db, {'name': 'Modele a dupliquer', 'intro': text})
+        cloned_id = app.clone_template(db, tid)
+        self.assertEqual(app.template_payload(db, cloned_id)['intro'], text)
 
 if __name__=='__main__': unittest.main()
