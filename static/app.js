@@ -386,7 +386,7 @@ async function finalSummary(s){
 }
 function qr(link){document.querySelector('.app-shell').classList.add('participant-mode');app.innerHTML=`<section class="card">${back}<h2>Projection QR code</h2><p class="muted">Vue plein écran pour vidéoprojecteur. Lien local : non accessible depuis un téléphone hors réseau.</p><div class="qr" style="max-width:420px;margin:1.5rem auto">${qrSvg(link)}</div><div class="link-box" style="max-width:420px;margin:0 auto">${esc(link)}</div></section>`}
 
-function slugifyForFilename(s){return ((s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase())||'mission'}
+function slugifyForFilename(s){let slug=((s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase())||'mission';const MAX=30;if(slug.length>MAX){slug=slug.slice(0,MAX);let cut=slug.lastIndexOf('-');if(cut>10)slug=slug.slice(0,cut)}return slug||'mission'}
 function wrapCanvasLines(ctx,text,maxWidth){let words=(text||'').split(/\s+/).filter(Boolean),line='',lines=[];for(const w of words){let test=line?line+' '+w:w;if(ctx.measureText(test).width>maxWidth&&line){lines.push(line);line=w}else line=test}if(line)lines.push(line);return lines.length?lines:['']}
 function drawCanvasLines(ctx,lines,cx,y,lineHeight){lines.forEach((l,i)=>ctx.fillText(l,cx,y+i*lineHeight));return y+lines.length*lineHeight}
 function drawQrOnCanvas(ctx,link,x,y,size){let mat;try{mat=generateQR(link,'M')}catch(e){return 0}let n=mat.length,quiet=4,total=n+2*quiet,cell=Math.max(1,Math.floor(size/total)),actual=cell*total,ox=x+Math.round((size-actual)/2),oy=y+Math.round((size-actual)/2);ctx.fillStyle='#fff';ctx.fillRect(ox,oy,actual,actual);ctx.fillStyle='#000';for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(mat[r][c])ctx.fillRect(ox+(c+quiet)*cell,oy+(r+quiet)*cell,cell,cell);return actual}
@@ -442,7 +442,9 @@ async function downloadInvitationCard(sessionId){
     a2.href=url;a2.download='invitation-'+slugifyForFilename(missionName)+'.png';
     document.body.appendChild(a2);a2.click();a2.remove();
     setTimeout(()=>URL.revokeObjectURL(url),4000);
-    notice('Carte d’invitation téléchargée.');
+    navigator.clipboard.writeText(link)
+      .then(()=>notice('Carte d’invitation téléchargée et lien copié : collez-le en légende de votre message.'))
+      .catch(()=>notice('Carte d’invitation téléchargée.'));
   },'image/png');
 }
 let participantName='';let participantAnonymous=false;
