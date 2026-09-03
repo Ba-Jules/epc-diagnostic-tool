@@ -341,7 +341,7 @@ return best.map(row=>row.map(v=>!!v))}
 })();
 function qrSvg(link){let mat;try{mat=generateQR(link,'M')}catch(e){return `<p class="error">${esc(e.message)}</p>`}let n=mat.length,quiet=4,size=n+2*quiet,rects='';for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(mat[r][c])rects+=`<rect x="${c+quiet}" y="${r+quiet}" width="1" height="1"/>`;return `<svg viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges">${rects}</svg>`}
 function copyLink(link){navigator.clipboard.writeText(link).then(()=>notice('Lien copié.')).catch(()=>notice('Copie impossible : sélectionnez le lien.'))}
-async function moderator(id){let [a,w,q]=await Promise.all([api('/api/sessions/'+id+'/analysis'),api('/api/sessions/'+id+'/workshop-data'),api('/api/sessions/'+id+'/qualitative-data')]);let link=location.origin+'/?session='+id;let done=[true,a.completedCount>0,w.priorities.length>0,q.entries.length>0,q.recommendations.length>0,q.recommendations.length>0,false];let progressTarget=a.session.expected_participants||a.participantCount;let pct=progressTarget?Math.round(a.completedCount/progressTarget*100):0;window.currentSessionId=id;shell('collecte','collecte',a.session.name,'Tableau de bord de l’atelier',{id,name:a.session.name,location:a.session.location,date:a.session.date,pct,statusLabel:a.session.status==='closed'?'Terminé':(a.participantCount?'Collecte '+pct+'%':'Préparation')});let primary=(!a.participantCount)?{l:'Ouvrir la collecte',a:`qr('${link}')`}:(a.completedCount<a.participantCount)?{l:'Afficher le QR',a:`qr('${link}')`}:(!w.priorities.length)?{l:'Voir le diagnostic',a:`diagnostic('${id}')`}:(!q.entries.length)?{l:'Analyser les priorités',a:`analysisPriorities('${id}')`}:(!q.recommendations.length)?{l:'Construire les recommandations',a:`recommendationsView('${id}')`}:{l:'Voir le rapport final',a:`finalReport('${id}')`};app.innerHTML=`<button class="ghost" onclick="load()">← Tous les ateliers</button><div class="card"><div class="section-header"><div><h2>${esc(a.session.name)}</h2><p class="text-meta">${sessionStatusBadge(a.session,a)}${a.session.date?' · '+esc(a.session.date):''}</p></div></div>${stepperHtml(done)}<div class="grid"><div class="metric"><span class="label">Commencés</span><b>${a.participantCount}</b></div><div class="metric"><span class="label">Validés</span><b>${a.completedCount}</b></div><div class="metric"><span class="label">Progression</span><b>${pct}%</b></div>${a.global.capacity!=null?`<div class="metric"><span class="label">Capacité globale</span><b>${fmt(a.global.capacity)}</b></div>`:''}${(a.global.consensus!=null||a.global.consensusNote)?`<div class="metric"><span class="label">Consensus global</span><b>${fmtConsensus(a.global)}</b></div>`:''}</div><div class="row" style="margin-top:1.1rem"><button onclick="${primary.a}">${primary.l}</button><button class="secondary" onclick="diagnostic('${id}')">Diagnostic</button><button class="ghost" onclick="preview('${id}')">Prévisualiser le questionnaire</button><button class="ghost" onclick="reportMetadata('${id}')">Informations de l’atelier</button><button class="ghost" onclick="finalReport('${id}')">Rapport final</button><button class="danger" onclick="removeSession('${id}','${esc(a.session.name)}',${a.participantCount},${a.completedCount})">Supprimer l’atelier</button></div></div><div class="card"><div class="section-header"><h3>Collecte</h3></div><div class="qr-panel sidebar-panel"><div class="qr">${qrSvg(link)}</div><div><p class="text-meta">Lien participant</p><div class="link-box"><span style="flex:1">${esc(link)}</span></div><div class="row" style="margin-top:.6rem"><button class="secondary" onclick="copyLink('${link}')">Copier le lien</button><button class="secondary" onclick="window.open('${link}','_blank')">Ouvrir participant</button><button class="ghost" onclick="qr('${link}')">Afficher en grand</button></div><p class="text-meta" style="margin-top:.6rem">${a.participantCount} participant${a.participantCount>1?'s':''} · ${a.completedCount} questionnaire${a.completedCount>1?'s':''} validé${a.completedCount>1?'s':''}</p></div></div></div>`}
+async function moderator(id){let [a,w,q]=await Promise.all([api('/api/sessions/'+id+'/analysis'),api('/api/sessions/'+id+'/workshop-data'),api('/api/sessions/'+id+'/qualitative-data')]);let link=location.origin+'/?session='+id;let done=[true,a.completedCount>0,w.priorities.length>0,q.entries.length>0,q.recommendations.length>0,q.recommendations.length>0,false];let progressTarget=a.session.expected_participants||a.participantCount;let pct=progressTarget?Math.round(a.completedCount/progressTarget*100):0;window.currentSessionId=id;shell('collecte','collecte',a.session.name,'Tableau de bord de l’atelier',{id,name:a.session.name,location:a.session.location,date:a.session.date,pct,statusLabel:a.session.status==='closed'?'Terminé':(a.participantCount?'Collecte '+pct+'%':'Préparation')});let primary=(!a.participantCount)?{l:'Ouvrir la collecte',a:`qr('${link}')`}:(a.completedCount<a.participantCount)?{l:'Afficher le QR',a:`qr('${link}')`}:(!w.priorities.length)?{l:'Voir le diagnostic',a:`diagnostic('${id}')`}:(!q.entries.length)?{l:'Analyser les priorités',a:`analysisPriorities('${id}')`}:(!q.recommendations.length)?{l:'Construire les recommandations',a:`recommendationsView('${id}')`}:{l:'Voir le rapport final',a:`finalReport('${id}')`};app.innerHTML=`<button class="ghost" onclick="load()">← Tous les ateliers</button><div class="card"><div class="section-header"><div><h2>${esc(a.session.name)}</h2><p class="text-meta">${sessionStatusBadge(a.session,a)}${a.session.date?' · '+esc(a.session.date):''}</p></div></div>${stepperHtml(done)}<div class="grid"><div class="metric"><span class="label">Commencés</span><b>${a.participantCount}</b></div><div class="metric"><span class="label">Validés</span><b>${a.completedCount}</b></div><div class="metric"><span class="label">Progression</span><b>${pct}%</b></div>${a.global.capacity!=null?`<div class="metric"><span class="label">Capacité globale</span><b>${fmt(a.global.capacity)}</b></div>`:''}${(a.global.consensus!=null||a.global.consensusNote)?`<div class="metric"><span class="label">Consensus global</span><b>${fmtConsensus(a.global)}</b></div>`:''}</div><div class="row" style="margin-top:1.1rem"><button onclick="${primary.a}">${primary.l}</button><button class="secondary" onclick="diagnostic('${id}')">Diagnostic</button><button class="ghost" onclick="preview('${id}')">Prévisualiser le questionnaire</button><button class="ghost" onclick="reportMetadata('${id}')">Informations de l’atelier</button><button class="ghost" onclick="finalReport('${id}')">Rapport final</button><button class="danger" onclick="removeSession('${id}','${esc(a.session.name)}',${a.participantCount},${a.completedCount})">Supprimer l’atelier</button></div></div><div class="card"><div class="section-header"><h3>Collecte</h3></div><div class="qr-panel sidebar-panel"><div class="qr">${qrSvg(link)}</div><div><p class="text-meta">Lien participant</p><div class="link-box"><span style="flex:1">${esc(link)}</span></div><div class="row" style="margin-top:.6rem"><button class="secondary" onclick="copyLink('${link}')">Copier le lien</button><button class="secondary" onclick="window.open('${link}','_blank')">Ouvrir participant</button><button class="ghost" onclick="qr('${link}')">Afficher en grand</button><button class="secondary" onclick="downloadInvitationCard('${id}')">Télécharger la carte d’invitation</button></div><p class="text-meta" style="margin-top:.6rem">${a.participantCount} participant${a.participantCount>1?'s':''} · ${a.completedCount} questionnaire${a.completedCount>1?'s':''} validé${a.completedCount>1?'s':''}</p></div></div></div>`}
 function removeSession(id,name,started=0,completed=0){
   let n=document.querySelector('#notice');if(!n){n=document.createElement('div');n.id='notice';document.body.appendChild(n)}
   n.className='help-modal';
@@ -385,6 +385,66 @@ async function finalSummary(s){
   </section>`;
 }
 function qr(link){document.querySelector('.app-shell').classList.add('participant-mode');app.innerHTML=`<section class="card">${back}<h2>Projection QR code</h2><p class="muted">Vue plein écran pour vidéoprojecteur. Lien local : non accessible depuis un téléphone hors réseau.</p><div class="qr" style="max-width:420px;margin:1.5rem auto">${qrSvg(link)}</div><div class="link-box" style="max-width:420px;margin:0 auto">${esc(link)}</div></section>`}
+
+function slugifyForFilename(s){return ((s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase())||'mission'}
+function wrapCanvasLines(ctx,text,maxWidth){let words=(text||'').split(/\s+/).filter(Boolean),line='',lines=[];for(const w of words){let test=line?line+' '+w:w;if(ctx.measureText(test).width>maxWidth&&line){lines.push(line);line=w}else line=test}if(line)lines.push(line);return lines.length?lines:['']}
+function drawCanvasLines(ctx,lines,cx,y,lineHeight){lines.forEach((l,i)=>ctx.fillText(l,cx,y+i*lineHeight));return y+lines.length*lineHeight}
+function drawQrOnCanvas(ctx,link,x,y,size){let mat;try{mat=generateQR(link,'M')}catch(e){return 0}let n=mat.length,quiet=4,total=n+2*quiet,cell=Math.max(1,Math.floor(size/total)),actual=cell*total,ox=x+Math.round((size-actual)/2),oy=y+Math.round((size-actual)/2);ctx.fillStyle='#fff';ctx.fillRect(ox,oy,actual,actual);ctx.fillStyle='#000';for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(mat[r][c])ctx.fillRect(ox+(c+quiet)*cell,oy+(r+quiet)*cell,cell,cell);return actual}
+
+async function downloadInvitationCard(sessionId){
+  let a;
+  try{a=await api('/api/sessions/'+sessionId+'/analysis')}catch(e){return notice('Impossible de générer la carte : '+e.message)}
+  let link=location.origin+'/?session='+sessionId;
+  let missionName=a.session.name||'Diagnostic EPC / SENEVAL';
+  let questionnaireName=(T.find(x=>x.id===a.session.template_id)||{}).name||'';
+  if(!questionnaireName){try{questionnaireName=(await api('/api/templates/'+a.session.template_id)).name||''}catch(_){}}
+
+  const W=1000,H=1400;
+  const canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.fillStyle='#f4f6f9';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#ffffff';ctx.fillRect(40,40,W-80,H-80);
+  ctx.strokeStyle='#e2e8f0';ctx.lineWidth=2;ctx.strokeRect(40,40,W-80,H-80);
+
+  ctx.textAlign='center';
+  ctx.font='bold 32px Arial, sans-serif';
+  let titleLines=wrapCanvasLines(ctx,missionName,W-160);
+  let headerH=70+titleLines.length*38+25;
+  ctx.fillStyle='#17212b';ctx.fillRect(40,40,W-80,headerH);
+  ctx.fillStyle='#ffd84d';ctx.font='bold 20px Arial, sans-serif';
+  ctx.fillText('EPC / SENEVAL — DIAGNOSTIC PARTICIPATIF',W/2,80);
+  ctx.fillStyle='#ffffff';ctx.font='bold 32px Arial, sans-serif';
+  drawCanvasLines(ctx,titleLines,W/2,120,38);
+
+  let y=40+headerH+45;
+  if(questionnaireName){
+    ctx.fillStyle='#5b6b82';ctx.font='22px Arial, sans-serif';
+    y=drawCanvasLines(ctx,wrapCanvasLines(ctx,'Questionnaire : '+questionnaireName,W-160),W/2,y,28)+15;
+  }
+
+  let qrSize=640,qx=(W-qrSize)/2,qy=y;
+  drawQrOnCanvas(ctx,link,qx,qy,qrSize);
+  y=qy+qrSize+55;
+
+  ctx.fillStyle='#17212b';ctx.font='bold 25px Arial, sans-serif';
+  y=drawCanvasLines(ctx,wrapCanvasLines(ctx,'Scannez le QR Code ou ouvrez le lien pour participer.',W-160),W/2,y,32)+25;
+
+  ctx.fillStyle='#2f6fed';ctx.font='22px Arial, sans-serif';
+  drawCanvasLines(ctx,wrapCanvasLines(ctx,link,W-160),W/2,y,30);
+
+  ctx.fillStyle='#9aa7b5';ctx.font='16px Arial, sans-serif';
+  ctx.fillText('Carte générée automatiquement — outil de diagnostic EPC / SENEVAL',W/2,H-70);
+
+  canvas.toBlob(blob=>{
+    if(!blob)return notice('Génération de la carte impossible.');
+    const url=URL.createObjectURL(blob);
+    const a2=document.createElement('a');
+    a2.href=url;a2.download='invitation-'+slugifyForFilename(missionName)+'.png';
+    document.body.appendChild(a2);a2.click();a2.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    notice('Carte d’invitation téléchargée.');
+  },'image/png');
+}
 let participantName='';let participantAnonymous=false;
 async function preview(sid){let a=await api('/api/sessions/'+sid+'/analysis'),t=await api('/api/templates/'+a.session.template_id);window.currentSessionId=sid;shell('questionnaire','config',a.session.name,'Aperçu du questionnaire');page(sid,null,t,a.session,{},0,true)};async function join(sid){
   document.querySelector('.app-shell').classList.add('participant-mode');participantName='';participantProfile={};
