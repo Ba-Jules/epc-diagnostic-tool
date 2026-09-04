@@ -1050,6 +1050,20 @@ def validate_intro_word_count(intro: str | None) -> None:
         raise ValueError(f"L'introduction du questionnaire doit contenir au maximum {INTRO_MAX_WORDS} mots (actuellement {count}).")
 
 
+DOMAIN_SUMMARY_MAX_WORDS = 60
+
+
+def validate_domain_summary_word_count(summary: str | None) -> None:
+    """Champ facultatif "Présentation sommaire de la situation ou résultats des
+    discussions" rattaché à CHAQUE domaine (mission :8810, 3e retour Mouhamed BA —
+    remplace l'introduction globale du questionnaire, qui n'était finalement pas
+    au bon niveau). Réutilise la colonne domains.description, jusqu'ici présente
+    en base mais jamais exposée côté interface."""
+    count = len((summary or "").split())
+    if count > DOMAIN_SUMMARY_MAX_WORDS:
+        raise ValueError(f"La présentation sommaire du domaine doit contenir au maximum {DOMAIN_SUMMARY_MAX_WORDS} mots (actuellement {count}).")
+
+
 def create_blank_template(db, data, owner_user_id=None):
     tid, stamp = str(uuid.uuid4()), now(); name=data.get("name", "Nouveau questionnaire").strip()
     if not name: raise ValueError("Le nom est obligatoire")
@@ -2364,6 +2378,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json(201,{"id":clone_template(db,path.split("/")[3],data.get("name"))})
             if path.startswith("/api/templates/") and path.endswith("/domains"):
                 tid=path.split("/")[3]; guard_structural_edit(db,tid,"add")
+                validate_domain_summary_word_count(data.get("description"))
                 did=str(uuid.uuid4()); code=data.get("code") or "domain-"+uuid.uuid4().hex[:8]; db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)",(did,tid,code,data["label"],data.get("description",""),int(data.get("displayOrder") or next_order(db,"domains","template_id",tid)),int(data.get("active",True)))); db.commit(); return self.json(201,{"id":did})
             if path.startswith("/api/domains/") and path.endswith("/indicators"):
                 did=path.split("/")[3]
@@ -2469,6 +2484,7 @@ class Handler(SimpleHTTPRequestHandler):
                 did=path.split("/")[3]
                 owner_domain=db.execute("SELECT template_id FROM domains WHERE id=?",(did,)).fetchone()
                 if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"edit")
+                validate_domain_summary_word_count(data.get("description"))
                 db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",(data["label"],data.get("description",""),int(data.get("displayOrder",1)),int(data.get("active",True)),did)); db.commit(); return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]

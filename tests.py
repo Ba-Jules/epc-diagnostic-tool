@@ -891,4 +891,49 @@ class EngineTests(unittest.TestCase):
         cloned_id = app.clone_template(db, tid)
         self.assertEqual(app.template_payload(db, cloned_id)['intro'], text)
 
+    # --- Mission :8810 (presentation sommaire par domaine, 3e retour Mouhamed BA) ---
+    # Remplace l'introduction globale du questionnaire (ci-dessus) : reutilise la
+    # colonne domains.description, deja en base mais jamais exposee jusqu'ici.
+
+    def test_R_domain_summary_over_60_words_is_rejected(self):
+        long_summary = ' '.join(['mot'] * 61)
+        with self.assertRaises(ValueError):
+            app.validate_domain_summary_word_count(long_summary)
+
+    def test_S_domain_summary_of_exactly_60_words_is_accepted(self):
+        ok_summary = ' '.join(['mot'] * 60)
+        app.validate_domain_summary_word_count(ok_summary)
+
+    def test_T_domain_summary_empty_or_none_is_accepted(self):
+        app.validate_domain_summary_word_count(None)
+        app.validate_domain_summary_word_count('')
+
+    def test_U_domain_description_field_round_trips_through_template_payload(self):
+        db = self.db
+        tid = app.create_blank_template(db, {'name': 'Modele domaine'})
+        did = str(uuid.uuid4())
+        db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, 'dom-1', 'Domaine test', 'Présentation sommaire du domaine.', 1, 1))
+        db.commit()
+        payload = app.template_payload(db, tid)
+        self.assertEqual(payload['domains'][0]['description'], 'Présentation sommaire du domaine.')
+
+    # --- Mission :8810 (histogrammes sans reponse, 3e retour Mouhamed BA) ---
+    # L'affichage cote frontend (static/app.js) ne filtre plus les entrees sans
+    # reponse ; ce test verrouille le contrat backend dont ce fix depend : chaque
+    # indicateur actif reste liste (avec sa reference) meme a zero reponse.
+
+    def test_V_analysis_lists_every_active_indicator_even_with_zero_responses(self):
+        db = self.db
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
+        sid = 'session-empty'
+        self._mk_session(sid, 'vide', t)
+        out = app.analysis(db, sid)
+        first_domain = out['domains'][0]
+        self.assertEqual(len(first_domain['indicators']), 10)
+        for indicator in first_domain['indicators']:
+            self.assertIsNone(indicator['capacity'])
+            self.assertEqual(indicator['responses'], 0)
+            self.assertTrue(indicator['code'])
+        self.assertIsNone(first_domain['capacity'])
+
 if __name__=='__main__': unittest.main()
