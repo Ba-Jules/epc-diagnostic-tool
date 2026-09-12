@@ -772,6 +772,22 @@ PARTICIPANT_PROFILE_FIELD_MAP = {"displayName": "display_name", "anonymous": "an
     "educationLevelOther": "education_level_other"}
 
 
+def update_indicator_reference(db: sqlite3.Connection, indicator_id: str, code: str) -> None:
+    """Rename an indicator's "Référence" (indicators.code) only - deliberately independent
+    of guard_structural_edit (canonical/frozen-template lock): code is never read for
+    scoring or response matching (always indicator_id), only as a display label, so it
+    stays editable at any time, on any template including the canonical one, even on a
+    mission that already collected responses (demande Mouhamed BA, mission :8810).
+    Uniqueness within the same domain is still enforced (see indicator_code_conflicts)."""
+    row = db.execute("SELECT domain_id FROM indicators WHERE id=?", (indicator_id,)).fetchone()
+    if not row:
+        raise KeyError(indicator_id)
+    if indicator_code_conflicts(db, row["domain_id"], code, exclude_id=indicator_id):
+        raise ValueError("Cette référence est déjà utilisée par une autre question de ce domaine.")
+    db.execute("UPDATE indicators SET code=? WHERE id=?", (code, indicator_id))
+    db.commit()
+
+
 def indicator_code_conflicts(db: sqlite3.Connection, domain_id: str, code: str, exclude_id: str | None = None) -> bool:
     """Une "Référence" (indicators.code) dupliquée DANS LE MÊME DOMAINE crée une
     ambiguïté réelle (mission :8810, audit du champ Référence) : deux colonnes
@@ -2486,6 +2502,14 @@ class Handler(SimpleHTTPRequestHandler):
                 if owner_domain: guard_structural_edit(db,owner_domain["template_id"],"edit")
                 validate_domain_summary_word_count(data.get("description"))
                 db.execute("UPDATE domains SET label=?,description=?,display_order=?,active=? WHERE id=?",(data["label"],data.get("description",""),int(data.get("displayOrder",1)),int(data.get("active",True)),did)); db.commit(); return self.json(200,{"ok":True})
+            if path.startswith("/api/indicators/") and path.endswith("/reference"):
+                iid=path.split("/")[3]
+                code=(data.get("code") or "").strip()
+                if not code: return self.json(400,{"error":"La référence est obligatoire."})
+                try: update_indicator_reference(db,iid,code)
+                except KeyError: return self.json(404,{"error":"Question introuvable."})
+                except ValueError as e: return self.json(400,{"error":str(e)})
+                return self.json(200,{"ok":True})
             if path.startswith("/api/indicators/"):
                 iid=path.split("/")[3]
                 if not (data.get("code") or "").strip(): return self.json(400,{"error":"La référence est obligatoire."})

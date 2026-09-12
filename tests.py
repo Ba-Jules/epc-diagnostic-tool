@@ -225,6 +225,53 @@ class EngineTests(unittest.TestCase):
         app.guard_structural_edit(self.db, fork, "edit")  # must not raise
         app.guard_structural_edit(self.db, fork, "delete_template")  # must not raise
 
+    # --- Régression : Référence (indicators.code) éditable à tout moment (mission :8810) ---
+
+    def test_update_indicator_reference_works_directly_on_the_canonical(self):
+        t = self.db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = self.db.execute('select id from domains where template_id=? order by display_order limit 1', (t,)).fetchone()['id']
+        indicator = self.db.execute('select id,label from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()
+        # the general edit route would 409 here - update_indicator_reference must not
+        with self.assertRaises(app.StructuralEditForbiddenError):
+            app.guard_structural_edit(self.db, t, "edit")
+        app.update_indicator_reference(self.db, indicator['id'], 'Nouvelle Ref')
+        row = self.db.execute('select code,label from indicators where id=?', (indicator['id'],)).fetchone()
+        self.assertEqual(row['code'], 'Nouvelle Ref')
+        self.assertEqual(row['label'], indicator['label'])  # l'énoncé n'a pas bougé
+        # la structure du canonique reste 7x70 (aucun contournement du comptage EPC_DOMAINS)
+        payload = app.template_payload(self.db, t)
+        self.assertEqual(len(payload['domains']), 7)
+        self.assertEqual(sum(len(d['indicators']) for d in payload['domains']), 70)
+
+    def test_update_indicator_reference_still_rejects_duplicate_within_domain(self):
+        t = self.db.execute('select id from templates where is_canonical=1').fetchone()['id']
+        domain = self.db.execute('select id from domains where template_id=? order by display_order limit 1', (t,)).fetchone()['id']
+        inds = self.db.execute('select id,code from indicators where domain_id=? order by display_order limit 2', (domain,)).fetchall()
+        with self.assertRaises(ValueError):
+            app.update_indicator_reference(self.db, inds[1]['id'], inds[0]['code'])
+        # rien n'a été modifié après l'échec
+        unchanged = self.db.execute('select code from indicators where id=?', (inds[1]['id'],)).fetchone()['code']
+        self.assertEqual(unchanged, inds[1]['code'])
+
+    def test_update_indicator_reference_unknown_indicator_raises_keyerror(self):
+        with self.assertRaises(KeyError):
+            app.update_indicator_reference(self.db, 'does-not-exist', 'Ref')
+
+    def test_update_indicator_reference_works_on_a_mission_already_collecting_responses(self):
+        db = self.db
+        t = db.execute('select id,version from templates where is_canonical=1').fetchone()
+        sid = 'mission-ref-frozen'
+        self._mk_session(sid, template=t)
+        self._mk_participant(sid, 'p1', status='completed')
+        domain = db.execute('select id from domains where template_id=? order by display_order limit 1', (t['id'],)).fetchone()['id']
+        indicator = db.execute('select id from indicators where domain_id=? order by display_order limit 1', (domain,)).fetchone()['id']
+        db.execute('insert into responses values(?,?,?,?,?,?,?,?)', (str(uuid.uuid4()), sid, 'p1', indicator, json.dumps(4), 'numeric', app.now(), app.now()))
+        db.commit()
+        app.update_indicator_reference(db, indicator, 'Ref Post Reponses')  # must not raise
+        self.assertEqual(db.execute('select code from indicators where id=?', (indicator,)).fetchone()['code'], 'Ref Post Reponses')
+        # les reponses deja enregistrees restent intactes (jointure par indicator_id, jamais par code)
+        self.assertEqual(db.execute('select count(*) from responses where indicator_id=?', (indicator,)).fetchone()[0], 1)
+
     def test_editing_own_private_fork_does_not_clone(self):
         db = self.db
         t = db.execute('select id,version from templates where is_canonical=1').fetchone()
