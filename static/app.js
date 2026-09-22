@@ -1,4 +1,9 @@
 const app=document.querySelector('#app'),esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),fmt=v=>v==null?'—':Number(v).toFixed(1),fmtConsensus=o=>o&&o.consensusNote==='single_respondent'?'Non calculable':fmt(o?.consensus); function notice(message){let n=document.querySelector('#notice');if(!n){n=document.createElement('div');n.id='notice';document.body.appendChild(n)}n.className='notice';n.innerHTML=`<div><b>Information</b><p>${esc(message)}</p><button onclick="this.closest('.notice').remove()">Fermer</button></div>`} const api=(p,o={})=>fetch(p,{headers:{'Content-Type':'application/json'},...o}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error||'Action impossible.');return x}); window.addEventListener('unhandledrejection',e=>{e.preventDefault();notice(e.reason?.message||'Action impossible. Veuillez réessayer.');}); window.addEventListener('error',e=>{if(e.message)notice('Une action ne peut pas être réalisée : '+e.message)});let T=[],S=[];
+// Mode sombre : préférence par navigateur (pas de compte requis pour l'appliquer), appliquée tôt par
+// index.html pour éviter un flash clair→sombre, ré-affirmée ici pour les navigateurs sans script
+// bloquant. N'affecte jamais le rapport imprimé ni les exports (voir style.css).
+function getTheme(){try{return localStorage.getItem('epc-theme')==='dark'?'dark':'light'}catch(e){return 'light'}}
+function toggleTheme(btn){let next=getTheme()==='dark'?'light':'dark';try{localStorage.setItem('epc-theme',next)}catch(e){}document.documentElement.dataset.theme=next;if(btn){btn.textContent=next==='dark'?'☾':'☀';btn.setAttribute('aria-pressed',String(next==='dark'));btn.title=next==='dark'?'Passer en mode clair':'Passer en mode sombre'}}
 async function load(){[T,S]=await Promise.all([api('/api/templates'),api('/api/sessions')]);shell('home','','Diagnostic EPC / SENEVAL','Préparation, collecte et restitution d’ateliers',null);home()};const back='<button class="ghost" onclick="load()">← Retour à l’accueil</button>';
 window.currentSessionId=null;
 const DOMAIN_COLORS=['var(--domain-1)','var(--domain-2)','var(--domain-3)','var(--domain-4)','var(--domain-5)','var(--domain-6)','var(--domain-7)'];
@@ -21,7 +26,8 @@ function renderSidebar(active){
 }
 function renderTopbar(title,subtitle,cycleStage){
   let stages=[['config','CONFIGURER'],['collecte','COLLECTER'],['traiter','TRAITER'],['analyse','ANALYSER'],['restitution','RESTITUER']];
-  return `<div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-help" title="Aide" onclick="helpPanel()">?</button>`;
+  let dark=getTheme()==='dark';
+  return `<div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-theme" title="${dark?'Passer en mode clair':'Passer en mode sombre'}" aria-pressed="${dark}" onclick="toggleTheme(this)">${dark?'☾':'☀'}</button><button class="topbar-help" title="Aide" onclick="helpPanel()">?</button>`;
 }
 const HELP_SCREENS={
   home:{title:'Accueil',body:`

@@ -5,6 +5,11 @@
   --green-600:#1f8a53;--green-700:#186e42;--green-50:#e9f7f0;
   --red-600:#c0392b;--red-50:#fbeceb;
   --orange-600:#b8720d;--orange-50:#fdf3e3;
+  /* Couleurs de texte "accent" séparées des couleurs de fond (--blue-700 etc.) : ces dernières
+     servent aussi de fond plein avec texte blanc (boutons, bandeau de domaine) et ne doivent jamais
+     s'éclaircir en mode sombre, alors que le texte accentué sur fond teinté (--blue-50 etc.) doit
+     s'éclaircir pour rester lisible — d'où deux jeux de variables. Identiques en mode clair. */
+  --text-blue:var(--blue-700);--text-green:var(--green-600);--text-red:var(--red-600);--text-orange:var(--orange-600);
   --radius-sm:8px;--radius:10px;--radius-lg:14px;
   --shadow-xs:0 1px 2px rgba(13,33,56,.05);
   --shadow-sm:0 1px 2px rgba(13,33,56,.04),0 4px 12px rgba(13,33,56,.05);
@@ -78,7 +83,7 @@ body{background:var(--page-bg)}
 .cycle-step .cycle-ic{width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.08);display:grid;place-items:center;color:#ffd84d;font-size:1rem}
 .cycle-step.active{color:#fff;background:rgba(59,130,246,.25);box-shadow:inset 0 0 0 1px rgba(255,255,255,.3)}
 .cycle-step.active .cycle-ic{background:var(--accent-500);color:#fff;box-shadow:0 0 0 4px rgba(59,130,246,.3)}
-.topbar-help{all:unset;width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.08);color:#cfd8e8;display:grid;place-items:center;cursor:pointer;font-weight:700}
+.topbar-help,.topbar-theme,.topbar-lang{all:unset;width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.08);color:#cfd8e8;display:grid;place-items:center;cursor:pointer;font-weight:700}
 
 main{max-width:1180px;margin:0 auto;padding:1.6rem 1.4rem 3rem;width:100%}
 
@@ -110,7 +115,7 @@ main{max-width:1180px;margin:0 auto;padding:1.6rem 1.4rem 3rem;width:100%}
 /* ---------- Stat pills (domaines/indicateurs count) ---------- */
 .pill-row{display:flex;gap:.7rem;flex-wrap:wrap;margin-bottom:.9rem}
 .stat-pill{display:flex;align-items:center;gap:.6rem;background:var(--gray-50);border:1px solid var(--gray-100);border-radius:12px;padding:.55rem .9rem;flex:1;min-width:140px}
-.stat-pill .pill-ic{width:30px;height:30px;border-radius:9px;background:var(--blue-50);color:var(--blue-700);display:grid;place-items:center;flex:0 0 auto}
+.stat-pill .pill-ic{width:30px;height:30px;border-radius:9px;background:var(--blue-50);color:var(--text-blue);display:grid;place-items:center;flex:0 0 auto}
 .stat-pill b{display:block;font-size:1.2rem;color:var(--gray-900);line-height:1}
 .stat-pill span{display:block;font-size:.68rem;color:var(--gray-500);font-weight:700;letter-spacing:.03em;text-transform:uppercase;margin-top:.15rem}
 
@@ -129,11 +134,11 @@ main{max-width:1180px;margin:0 auto;padding:1.6rem 1.4rem 3rem;width:100%}
 .scale-card .sc-label-input{width:100%;font-size:.76rem;font-weight:600;margin:.25rem 0 .5rem;min-height:2.2em;text-align:center;border:none;background:transparent;color:inherit;border-radius:6px;padding:.1rem .2rem}
 .scale-card .sc-label-input:hover,.scale-card .sc-label-input:focus{background:rgba(255,255,255,.6);outline:1.5px solid currentColor}
 .scale-card .sc-emoji{font-size:1.4rem}
-.scale-card.sc-1{background:var(--red-50);border-color:#f3c6c1;color:var(--red-600)}
-.scale-card.sc-2{background:var(--orange-50);border-color:#f0d4a8;color:var(--orange-600)}
+.scale-card.sc-1{background:var(--red-50);border-color:#f3c6c1;color:var(--text-red)}
+.scale-card.sc-2{background:var(--orange-50);border-color:#f0d4a8;color:var(--text-orange)}
 .scale-card.sc-3{background:#fdfbe9;border-color:#eee3a8;color:#9a8a1f}
 .scale-card.sc-4{background:#eef8ef;border-color:#bfe3c4;color:#2f8f45}
-.scale-card.sc-5{background:var(--green-50);border-color:#a9dcc0;color:var(--green-700)}
+.scale-card.sc-5{background:var(--green-50);border-color:#a9dcc0;color:var(--text-green)}
 
 /* ---------- Configuration screen grids ---------- */
 .cfg-grid-71{display:grid;grid-template-columns:1.5fr 1fr;gap:1rem;align-items:stretch}
@@ -142,7 +147,7 @@ main{max-width:1180px;margin:0 auto;padding:1.6rem 1.4rem 3rem;width:100%}
 
 /* ---------- Ready-to-launch block ---------- */
 .launch-block{display:flex;flex-direction:column;gap:.7rem}
-.launch-block .launch-ic{width:38px;height:38px;border-radius:10px;background:var(--blue-50);color:var(--blue-700);display:grid;place-items:center}
+.launch-block .launch-ic{width:38px;height:38px;border-radius:10px;background:var(--blue-50);color:var(--text-blue);display:grid;place-items:center}
 .launch-block button.primary-lg{background:var(--accent-600);font-size:.98rem;padding:.85rem 1.1rem}
 .launch-block button.primary-lg:hover{background:var(--accent-500)}
 
@@ -186,9 +191,9 @@ button:active{transform:scale(.98)}
 button:disabled{opacity:.45;cursor:not-allowed}
 button.secondary{background:var(--gray-100);color:var(--gray-900);border:1px solid var(--gray-200)}
 button.secondary:hover{background:var(--gray-200)}
-button.ghost{background:transparent;color:var(--blue-700);padding:.4rem .2rem;font-weight:600}
+button.ghost{background:transparent;color:var(--text-blue);padding:.4rem .2rem;font-weight:600}
 button.ghost:hover{background:transparent;text-decoration:underline}
-button.danger{background:var(--red-50);color:var(--red-600)}
+button.danger{background:var(--red-50);color:var(--text-red)}
 button.danger:hover{background:#f6d9d6}
 button.export{background:var(--green-600)}
 button.export:hover{background:var(--green-700)}
@@ -200,22 +205,22 @@ form>button,form>.row>button{width:auto}
 
 /* ---------- Badges ---------- */
 .badge{display:inline-flex;align-items:center;gap:.3rem;padding:.22rem .62rem;border-radius:999px;font-size:.74rem;font-weight:700;letter-spacing:.01em;white-space:nowrap}
-.badge-success{background:var(--green-50);color:var(--green-600)}
-.badge-progress{background:var(--orange-50);color:var(--orange-600)}
+.badge-success{background:var(--green-50);color:var(--text-green)}
+.badge-progress{background:var(--orange-50);color:var(--text-orange)}
 .badge-neutral{background:var(--gray-100);color:var(--gray-700)}
-.badge-info{background:var(--blue-50);color:var(--blue-700)}
-.badge-danger{background:var(--red-50);color:var(--red-600)}
+.badge-info{background:var(--blue-50);color:var(--text-blue)}
+.badge-danger{background:var(--red-50);color:var(--text-red)}
 
 /* ---------- Assistant IA (facultatif) ---------- */
 .ai-badge{display:inline-flex;align-items:center;gap:.3rem;padding:.22rem .62rem;border-radius:999px;font-size:.7rem;font-weight:700;letter-spacing:.02em;white-space:nowrap;background:var(--gray-100);color:var(--gray-700);vertical-align:middle}
 .ai-badge:empty{display:none}
-.ai-badge[data-pricing="GRATUIT"]{background:var(--green-50);color:var(--green-600)}
-.ai-badge[data-pricing="ESSAI"]{background:var(--orange-50);color:var(--orange-600)}
+.ai-badge[data-pricing="GRATUIT"]{background:var(--green-50);color:var(--text-green)}
+.ai-badge[data-pricing="ESSAI"]{background:var(--orange-50);color:var(--text-orange)}
 .ai-badge[data-pricing="PAYANT"]{background:var(--gray-100);color:var(--gray-700)}
-button.ai-btn{background:var(--blue-50);color:var(--blue-700);border:1px solid var(--blue-50)}
+button.ai-btn{background:var(--blue-50);color:var(--text-blue);border:1px solid var(--blue-50)}
 button.ai-btn:hover{background:var(--blue-600);color:#fff}
 .ai-suggestion{border:1px dashed var(--blue-600);background:var(--blue-50)}
-.ai-suggestion .section-header h3{color:var(--blue-700)}
+.ai-suggestion .section-header h3{color:var(--text-blue)}
 .ai-item{border-top:1px solid var(--gray-200);padding-top:.6rem;margin-top:.6rem}
 .ai-item:first-of-type{border-top:0;padding-top:0;margin-top:0}
 .ai-edit-area{background:#fff}
@@ -226,7 +231,7 @@ button.ai-btn:hover{background:var(--blue-600);color:#fff}
 .action-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin:0 0 1.2rem}
 .action-card{background:#fff;border:1px solid var(--gray-200);border-radius:var(--radius-lg);padding:1.4rem;cursor:pointer;transition:border-color .15s,box-shadow .15s,transform .15s;text-align:left}
 .action-card:hover{border-color:var(--blue-600);box-shadow:var(--shadow-md);transform:translateY(-1px)}
-.action-card .icon{width:38px;height:38px;border-radius:10px;background:var(--blue-50);color:var(--blue-700);display:grid;place-items:center;margin-bottom:.7rem}
+.action-card .icon{width:38px;height:38px;border-radius:10px;background:var(--blue-50);color:var(--text-blue);display:grid;place-items:center;margin-bottom:.7rem}
 .action-card h3{margin:.1rem 0 .3rem}
 .action-card p{color:var(--gray-500);margin:0 0 1rem;font-size:.9rem}
 .action-card button{width:auto}
@@ -236,9 +241,9 @@ button.ai-btn:hover{background:var(--blue-600);color:#fff}
 .stat-card{display:flex;align-items:center;gap:.8rem;background:#fff;border:1px solid var(--gray-100);border-radius:var(--radius-lg);padding:1rem 1.1rem;box-shadow:var(--shadow-xs)}
 .stat-icon{flex:0 0 auto;width:38px;height:38px;border-radius:var(--radius-sm);display:grid;place-items:center}
 .stat-icon svg{width:19px;height:19px;display:block}
-.stat-icon.tone-blue{background:var(--blue-50);color:var(--blue-700)}
-.stat-icon.tone-orange{background:var(--orange-50);color:var(--orange-600)}
-.stat-icon.tone-green{background:var(--green-50);color:var(--green-600)}
+.stat-icon.tone-blue{background:var(--blue-50);color:var(--text-blue)}
+.stat-icon.tone-orange{background:var(--orange-50);color:var(--text-orange)}
+.stat-icon.tone-green{background:var(--green-50);color:var(--text-green)}
 .stat-icon.tone-neutral{background:var(--gray-100);color:var(--gray-700)}
 .stat-body{min-width:0}
 .stat-num{font-size:1.85rem;font-weight:800;color:var(--gray-900);line-height:1.05;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
@@ -248,7 +253,7 @@ button.ai-btn:hover{background:var(--blue-600);color:#fff}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.8rem}
 .metric{border-radius:var(--radius);padding:1rem 1.1rem;background:var(--gray-50);border:1px solid var(--gray-100)}
 .metric .label{font-size:.82rem;color:var(--gray-500)}
-.metric b{display:block;font-size:1.7rem;color:var(--blue-700);margin-top:.15rem}
+.metric b{display:block;font-size:1.7rem;color:var(--text-blue);margin-top:.15rem}
 .metric-lg{grid-column:span 1}
 
 /* ---------- Session list ---------- */
@@ -272,7 +277,7 @@ button.ai-btn:hover{background:var(--blue-600);color:#fff}
 .stepper{display:flex;flex-wrap:wrap;gap:.45rem;margin:0 0 1.2rem}
 .step{display:flex;align-items:center;gap:.35rem;padding:.35rem .7rem;border-radius:999px;background:var(--gray-100);color:var(--gray-500);font-size:.78rem;font-weight:600}
 .step .dot{width:14px;height:14px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-size:.6rem;background:var(--gray-200);color:var(--gray-500)}
-.step.done{background:var(--green-50);color:var(--green-600)}
+.step.done{background:var(--green-50);color:var(--text-green)}
 .step.done .dot{background:var(--green-600);color:#fff}
 .step.current{background:var(--blue-600);color:#fff}
 .step.current .dot{background:#fff;color:var(--blue-600)}
@@ -311,9 +316,9 @@ th{color:var(--gray-500);font-weight:600;font-size:.8rem;text-transform:uppercas
 /* ---------- Participant questionnaire ---------- */
 .participant-header{font-size:.82rem;color:var(--gray-500);margin-bottom:.3rem}
 .questionnaire-intro{background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);padding:.65rem .9rem;font-size:.9rem;color:var(--gray-700);margin:.4rem 0 .8rem;white-space:pre-wrap}
-#intro-wordcount.over-limit{color:var(--red-600,#dc2626);font-weight:700}
-.scale-legend{background:var(--blue-50);border:1px solid #d7e5f2;border-radius:var(--radius);padding:.65rem .9rem;font-size:.84rem;color:var(--blue-800);margin:.6rem 0 1.1rem}
-.scale-legend b{color:var(--blue-900)}
+#intro-wordcount.over-limit{color:var(--text-red,#dc2626);font-weight:700}
+.scale-legend{background:var(--blue-50);border:1px solid #d7e5f2;border-radius:var(--radius);padding:.65rem .9rem;font-size:.84rem;color:var(--text-blue);margin:.6rem 0 1.1rem}
+.scale-legend b{color:var(--text-blue)}
 .domain-bar{background:var(--blue-700);color:#fff;padding:.65rem 1rem;border-radius:var(--radius-sm);margin:0 0 1rem}
 .domain-bar h2{color:#fff;margin:0}
 .scale-options{display:flex;gap:.5rem;margin:.5rem 0 .3rem}
@@ -323,7 +328,7 @@ th{color:var(--gray-500);font-weight:600;font-size:.8rem;text-transform:uppercas
 .scale-opt input[type=radio]:checked{border-color:var(--blue-600)}
 .scale-opt input[type=radio]:checked::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--blue-600)}
 .scale-num{font-weight:700;font-size:.92rem;color:var(--gray-700)}
-.scale-opt input[type=radio]:checked+.scale-num{color:var(--blue-700)}
+.scale-opt input[type=radio]:checked+.scale-num{color:var(--text-blue)}
 .scale-label{font-size:.72rem;color:var(--gray-500);text-align:center;margin-top:.2rem;display:block}
 
 .q-row{display:flex;align-items:center;justify-content:space-between;gap:1.2rem;padding:.7rem 0;border-bottom:1px solid var(--gray-100)}
@@ -336,7 +341,7 @@ th{color:var(--gray-500);font-weight:600;font-size:.8rem;text-transform:uppercas
   .q-row .scale-options{justify-content:space-between}
 }
 
-.preview{font-weight:700;color:var(--orange-600)}
+.preview{font-weight:700;color:var(--text-orange)}
 
 /* ---------- Notice / modal ---------- */
 .notice{position:fixed;inset:0;background:#0006;display:grid;place-items:center;z-index:20}
@@ -359,19 +364,21 @@ th{color:var(--gray-500);font-weight:600;font-size:.8rem;text-transform:uppercas
 .chart text{fill:#000}
 .graphs{margin:1rem 0}
 .legend{padding:.7rem 1rem;background:var(--green-50);border-left:4px solid var(--green-600);font-size:.86rem;border-radius:0 8px 8px 0}
-.chart-tip{position:fixed;z-index:30;display:none;max-width:280px;padding:.55rem .7rem;background:var(--gray-900);color:#fff;border-radius:6px;font-size:.85rem;pointer-events:none;box-shadow:0 3px 12px #0005}
+/* #17212b = --gray-900 d'origine, fixé en dur (pas la variable) : cette bulle d'info doit rester un
+   chip sombre à texte blanc dans les deux thèmes, jamais s'éclaircir avec le reste du texte en mode sombre. */
+.chart-tip{position:fixed;z-index:30;display:none;max-width:280px;padding:.55rem .7rem;background:#17212b;color:#fff;border-radius:6px;font-size:.85rem;pointer-events:none;box-shadow:0 3px 12px #0005}
 .graphbar{cursor:help;transition:opacity .15s}
 .graphbar:hover{opacity:.7}
 
 /* ---------- Final report ---------- */
 .report{background:#fff;padding:2.4rem;line-height:1.55;border-radius:var(--radius-lg)}
-.report h1,.report h2,.report h3{color:var(--blue-700)}
+.report h1,.report h2,.report h3{color:var(--text-blue)}
 .report h2{border-bottom:2px solid var(--blue-600);padding-bottom:.3rem;margin-top:2.2rem}
 .report-cover{text-align:center;min-height:42vh;display:grid;place-content:center;border-bottom:5px solid var(--blue-600)}
 .report-cover h1{font-size:2.1rem}
 .report-cover h2{border:0;color:var(--gray-700)}
 .report-nav{display:flex;flex-wrap:wrap;gap:.5rem;margin:0 0 1.6rem}
-.report-nav a{padding:.32rem .6rem;background:var(--blue-50);color:var(--blue-700);border-radius:999px;text-decoration:none;font-size:.82rem;font-weight:600}
+.report-nav a{padding:.32rem .6rem;background:var(--blue-50);color:var(--text-blue);border-radius:999px;text-decoration:none;font-size:.82rem;font-weight:600}
 .report-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.6rem}
 .report-domain,.report>section{break-inside:avoid-page}
 .report table{font-size:.9rem}
@@ -404,4 +411,37 @@ th{color:var(--gray-500);font-weight:600;font-size:.8rem;text-transform:uppercas
   .session-row .progress-wrap{order:3;width:100%}
   .card table,.report table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
   .report-columns{grid-template-columns:1fr}
+}
+
+/* ============================================================
+   Mode sombre — additif uniquement (nouvelles règles sous [data-theme="dark"]), jamais une
+   modification des règles claires ci-dessus : le thème clair reste identique au pixel. Restreint à
+   @media screen : le rapport imprimé (@media print) et les exports Word/Excel (générés côté serveur,
+   indépendants du thème client) ne sont jamais concernés. La sidebar et le bandeau supérieur restent
+   volontairement inchangés : ils sont déjà sombres par charte dans les deux thèmes. Les couleurs de
+   domaine (--domain-1..7) et les graphiques SVG (.chart, toujours imprimables) restent inchangés à
+   dessein, comme les couleurs pleines de bouton (--blue-700, --green-600, etc., texte blanc dessus).
+   ============================================================ */
+@media screen {
+  :root[data-theme="dark"] {
+    --page-bg:#0b0f1c;
+    --white:#141b29;--gray-50:#141b29;--gray-100:#1c2536;--gray-200:#2a3448;
+    --gray-400:#7c8aa5;--gray-500:#93a0b8;--gray-700:#c3ccd9;--gray-900:#e7ecf5;
+    --blue-50:#132a45;--green-50:#123324;--red-50:#3a201d;--orange-50:#3a2c12;
+    --text-blue:#8fbcf5;--text-green:#7fd8a8;--text-red:#f0958a;--text-orange:#f0c078;
+  }
+  :root[data-theme="dark"] .card,
+  :root[data-theme="dark"] .action-card,
+  :root[data-theme="dark"] .stat-card,
+  :root[data-theme="dark"] input,
+  :root[data-theme="dark"] select,
+  :root[data-theme="dark"] textarea,
+  :root[data-theme="dark"] .ai-edit-area,
+  :root[data-theme="dark"] .notice>div,
+  :root[data-theme="dark"] .help-modal>div,
+  :root[data-theme="dark"] .report,
+  :root[data-theme="dark"] .hstepper .hstep.current .circle,
+  :root[data-theme="dark"] .scale-opt input[type=radio]{background:var(--gray-50)}
+  :root[data-theme="dark"] a{color:var(--text-blue)}
+  :root[data-theme="dark"] ::placeholder{color:var(--gray-500)}
 }
