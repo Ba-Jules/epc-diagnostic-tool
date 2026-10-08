@@ -471,6 +471,12 @@ def init_schema(db: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS report_ai_blocks (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), section_key TEXT NOT NULL, content TEXT NOT NULL, retained_at TEXT NOT NULL, UNIQUE(session_id, section_key));
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', display_name TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS auth_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+    -- Marqueurs de provisionnement "exactement une fois" : une ligne par contenu
+    -- livre automatiquement (ex. la version SenEval V5 du gabarit 7x5). Purement
+    -- additif, jamais lu ni ecrit par l'interface : permet de ne jamais recreer un
+    -- contenu que le pilote aurait volontairement supprime, et de ne pas dependre
+    -- d'une correspondance par nom/texte pour savoir si la livraison a deja eu lieu.
+    CREATE TABLE IF NOT EXISTS provisioning_marks (key TEXT PRIMARY KEY, template_id TEXT, created_at TEXT NOT NULL);
     """)
     db.commit()
     existing_columns = {r["name"] for r in db.execute("PRAGMA table_info(participants)")}
@@ -523,6 +529,7 @@ def init_db(db: sqlite3.Connection) -> None:
     migrate_reference_questionnaire(db)
     migrate_ownership(db)
     ensure_epc_35_template(db)
+    ensure_seneval_v5_template(db)
 
 
 def migrate_reference_questionnaire(db: sqlite3.Connection) -> None:
@@ -735,6 +742,32 @@ EPC_DOMAINS_5 = [
 EPC_35_TEMPLATE_NAME = "EPC / SENEVAL (7 domaines x 5 indicateurs)"
 
 
+SENEVAL_V5_PROVISIONING_KEY = "seneval_v5_template"
+SENEVAL_V5_DESCRIPTION = "Version SenEval V5 : introduction courte par domaine et libelles d'echelle V5. Memes 7 domaines et memes 35 indicateurs que la version precedente."
+
+# Les sept introductions courtes fournies par le commanditaire dans
+# "6 Introduction Diagnostic de SenEval selon EPC V5 Courte.docx" (consignes_claude.txt,
+# point 2), reprises mot pour mot et rattachees par CODE de domaine (jamais par libelle,
+# qui peut etre renomme). Elles sont destinees a domains.description, le champ
+# "presentation sommaire du domaine" deja affiche aux participants.
+SENEVAL_V5_DOMAIN_INTROS = {
+    # grh — Gestion des ressources humaines
+    'grh': 'Les échanges ont fait ressortir les efforts de formation de SenEval, mais aussi des difficultés liées à la participation, à la circulation de l’information et au suivi des membres.',
+    # grf — Gestion des ressources financières
+    'grf': 'Les discussions ont fait ressortir des difficultés liées au recouvrement des cotisations, à la mobilisation des financements et à la faiblesse des appuis des partenaires.',
+    # parteq — Gestion de la participation équitable
+    'parteq': 'Les échanges ont fait ressortir l’existence de six groupes thématiques, mais aussi des difficultés de motivation et de participation effective des membres.',
+    # dur — Gestion de la durabilité des acquis
+    'dur': 'Les discussions ont fait ressortir des acquis institutionnels importants, mais aussi des préoccupations concernant la fidélisation des membres et leur implication dans les projets.',
+    # partn — Gestion du partenariat
+    'partn': 'Les échanges ont fait ressortir un réseau diversifié de partenaires institutionnels et professionnels, ainsi que le développement de relations avec plusieurs institutions publiques.',
+    # apporg — Gestion de l’apprentissage organisationnel
+    'apporg': 'Les discussions ont fait ressortir plusieurs initiatives de formation, de coaching, de mentorat et de partage de connaissances, notamment au bénéfice des évaluateurs émergents.',
+    # gouv — Gestion stratégique et gouvernance
+    'gouv': 'Les échanges ont fait ressortir des difficultés de communication entre le Comité de coordination et les Groupes thématiques, ainsi que des préoccupations concernant la supervision des activités.',
+}
+
+
 def ensure_epc_35_template(db: sqlite3.Connection) -> None:
     """Cree une fois, de maniere idempotente, le nouveau gabarit reduit EPC_DOMAINS_5 (7x35),
     fourni par le pilote le 19/08/2026 pour ses futures missions. Purement additif : un seul
@@ -761,6 +794,43 @@ def ensure_epc_35_template(db: sqlite3.Connection) -> None:
             db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, str(order_num), enonce, "", "numeric", 1, i_order, 1, "{}"))
             order_num += 1
     db.commit()
+
+
+def ensure_seneval_v5_template(db: sqlite3.Connection) -> str | None:
+    """Livre une fois, et une seule, la VERSION 2 du gabarit EPC_35_TEMPLATE_NAME : la
+    version SenEval V5 demandee par le commanditaire (consignes_claude.txt, points 1-2).
+
+    Strictement additif. On clone la version la plus ancienne du gabarit via
+    clone_template() — donc les 7 domaines et les 35 indicateurs sont repris a
+    l'identique, codes/libelles/ordre/formules compris — puis on ne modifie QUE la
+    copie fraiche : les libelles de l'echelle et la description sommaire des sept
+    domaines. Aucun UPDATE n'est jamais fait sur la version 1, sur un autre gabarit,
+    sur un fork prive d'atelier (status='session_locked') ni sur une session : les
+    ateliers existants ou en cours sont donc inchanges par construction, et ceux qui
+    ont deja commence a collecter possedent de toute facon deja leur propre copie
+    privee (voir ensure_private_template).
+
+    L'idempotence ne repose ni sur le nom, ni sur le numero de version, ni sur le texte
+    des introductions — tous modifiables par le pilote — mais sur une ligne dediee de
+    provisioning_marks. Consequence voulue : si le pilote supprime volontairement cette
+    version, elle n'est pas recreee au redemarrage suivant.
+    """
+    mark = db.execute("SELECT template_id FROM provisioning_marks WHERE key=?", (SENEVAL_V5_PROVISIONING_KEY,)).fetchone()
+    if mark:
+        return mark["template_id"]
+    base = db.execute("SELECT id FROM templates WHERE name=? ORDER BY version ASC LIMIT 1", (EPC_35_TEMPLATE_NAME,)).fetchone()
+    if not base:
+        # Base absente (gabarit jamais seede ou supprime) : on ne fabrique rien a partir
+        # de rien et on ne pose pas de marqueur, pour pouvoir reessayer plus tard.
+        return None
+    tid = clone_template(db, base["id"])
+    db.execute("UPDATE templates SET description=?,scale_json=?,updated_at=? WHERE id=?",
+               (SENEVAL_V5_DESCRIPTION, json.dumps({"type": "numeric", "min": 1, "max": 5, "labels": dict(SCALE_LABELS_DEFAULT)}), now(), tid))
+    for code, intro in SENEVAL_V5_DOMAIN_INTROS.items():
+        db.execute("UPDATE domains SET description=? WHERE template_id=? AND code=?", (intro, tid, code))
+    db.execute("INSERT INTO provisioning_marks VALUES (?,?,?)", (SENEVAL_V5_PROVISIONING_KEY, tid, now()))
+    db.commit()
+    return tid
 
 
 def rows(db: sqlite3.Connection, sql: str, args=()):

@@ -31,6 +31,53 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(scale["labels"],expected,name); self.assertEqual((scale["min"],scale["max"]),(1,5),name)
         self.assertEqual(app.GRADING[0],(0,22,5)); self.assertEqual(app.GRADING[-1],(99,100,100))
 
+    def _v5(self):
+        tid=self.db.execute("select template_id from provisioning_marks where key=?",(app.SENEVAL_V5_PROVISIONING_KEY,)).fetchone()["template_id"]
+        return app.template_payload(self.db,tid)
+    def _v1_of_35(self):
+        row=self.db.execute("select id from templates where name=? order by version asc limit 1",(app.EPC_35_TEMPLATE_NAME,)).fetchone()
+        return app.template_payload(self.db,row["id"])
+    def test_seneval_v5_version_reprend_les_35_indicateurs_a_l_identique(self):
+        v1,v5=self._v1_of_35(),self._v5()
+        self.assertNotEqual(v1["id"],v5["id"]); self.assertEqual(v5["name"],v1["name"]); self.assertGreater(v5["version"],v1["version"])
+        self.assertEqual(v5["status"],"active"); self.assertEqual(v5["is_canonical"],0)
+        shape=lambda t:[(d["code"],d["label"],d["display_order"],d["active"],
+                         [(i["code"],i["label"],i["description"],i["response_type"],i["required"],i["display_order"],i["active"]) for i in d["indicators"]])
+                        for d in t["domains"]]
+        self.assertEqual(shape(v5),shape(v1))
+        self.assertEqual(sum(len(d["indicators"]) for d in v5["domains"]),35)
+        for key in ("scoring","consensus","grading","priority"):
+            self.assertEqual(v5[key],v1[key],key)
+        self.assertEqual((v5["scale"]["min"],v5["scale"]["max"]),(v1["scale"]["min"],v1["scale"]["max"]))
+    def test_seneval_v5_porte_les_sept_introductions_et_les_libelles_v5(self):
+        v5=self._v5()
+        self.assertEqual(v5["scale"]["labels"],dict(app.SCALE_LABELS_DEFAULT))
+        self.assertEqual({d["code"]:d["description"] for d in v5["domains"]},app.SENEVAL_V5_DOMAIN_INTROS)
+        self.assertEqual(len(app.SENEVAL_V5_DOMAIN_INTROS),7)
+        for code,intro in app.SENEVAL_V5_DOMAIN_INTROS.items():
+            app.validate_domain_summary_word_count(intro)  # ne doit pas lever
+            self.assertLessEqual(len(intro.split()),app.DOMAIN_SUMMARY_MAX_WORDS,code)
+    def test_seneval_v5_ne_modifie_ni_la_v1_ni_le_canonique_ni_les_ateliers(self):
+        v1=self._v1_of_35()
+        self.assertEqual([d["description"] for d in v1["domains"]],[""]*7)
+        canonical=app.template_payload(self.db,self.db.execute("select id from templates where is_canonical=1").fetchone()["id"])
+        self.assertEqual([d["description"] for d in canonical["domains"]],[""]*7)
+        self.assertEqual(sum(len(d["indicators"]) for d in canonical["domains"]),70)
+        # un atelier cree sur la v1 garde sa v1, avec ses propres libelles
+        self._mk_session("s-v1",template=self.db.execute("select id,version from templates where id=?",(v1["id"],)).fetchone())
+        app.ensure_seneval_v5_template(self.db)
+        still=self.db.execute("select template_id,template_version from sessions where id=?",("s-v1",)).fetchone()
+        self.assertEqual(still["template_id"],v1["id"]); self.assertEqual(still["template_version"],v1["version"])
+    def test_seneval_v5_est_provisionnee_exactement_une_fois(self):
+        before=self.db.execute("select count(*) from templates").fetchone()[0]
+        first=self._v5()["id"]
+        for _ in range(3):
+            self.assertEqual(app.ensure_seneval_v5_template(self.db),first)
+        self.assertEqual(self.db.execute("select count(*) from templates").fetchone()[0],before)
+        self.assertEqual(self.db.execute("select count(*) from provisioning_marks where key=?",(app.SENEVAL_V5_PROVISIONING_KEY,)).fetchone()[0],1)
+        app.init_db(self.db)
+        self.assertEqual(self.db.execute("select count(*) from templates").fetchone()[0],before)
+
     def test_grade_and_analysis_keep_raw_responses(self):
         t=self.db.execute('select id,version from templates where is_canonical=1').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
