@@ -168,6 +168,20 @@ EPC_DOMAINS = [
     ]),
 ]
 
+# Libellés par défaut de l'échelle de notation 1-5, formulation retenue par le
+# commanditaire SenEval (V5). Source unique : seed_epc(), ensure_epc_35_template()
+# et la matrice XLSX d'import la réutilisent, pour qu'aucun emplacement ne puisse
+# dériver. Seuls les LIBELLÉS sont concernés : les valeurs numériques 1-5, les
+# formules de capacité/consensus et le barème GRADING restent inchangés, et les
+# gabarits déjà créés en base gardent les libellés avec lesquels ils ont collecté.
+SCALE_LABELS_DEFAULT = {
+    "1": "Tout à fait en désaccord",
+    "2": "Plutôt en désaccord",
+    "3": "Moyennement d’accord",
+    "4": "Plutôt d’accord",
+    "5": "Tout à fait d’accord",
+}
+
 GRADING = [(0, 22, 5), (23, 32, 10), (33, 39, 15), (40, 45, 20), (46, 50, 25), (51, 55, 30), (56, 59, 35), (60, 63, 40), (64, 67, 45), (68, 71, 50), (72, 74, 55), (75, 78, 60), (79, 81, 65), (82, 84, 70), (85, 87, 75), (88, 89, 80), (90, 92, 85), (93, 95, 90), (96, 98, 95), (99, 100, 100)]
 
 # ==================================================
@@ -646,7 +660,7 @@ def session_cookie_header(token: str | None = None, clear: bool = False) -> str:
 
 def seed_epc(db: sqlite3.Connection) -> str:
     tid, stamp = str(uuid.uuid4()), now()
-    scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
+    scale = {"type": "numeric", "min": 1, "max": 5, "labels": dict(SCALE_LABELS_DEFAULT)}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
     db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, "EPC / SENEVAL", 1, "Configuration initiale issue du questionnaire actuel.", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, None, 1, None))
@@ -735,7 +749,7 @@ def ensure_epc_35_template(db: sqlite3.Connection) -> None:
     owner = db.execute("SELECT id FROM users WHERE email=?", ("mouhba@local",)).fetchone()
     owner_user_id = owner["id"] if owner else None
     tid, stamp = str(uuid.uuid4()), now()
-    scale = {"type": "numeric", "min": 1, "max": 5, "labels": {"1": "Totalement en désaccord", "2": "En désaccord", "3": "Neutre", "4": "D’accord", "5": "Totalement d’accord"}}
+    scale = {"type": "numeric", "min": 1, "max": 5, "labels": dict(SCALE_LABELS_DEFAULT)}
     scoring = {"capacity": "mean_divided_by_scale_max", "outputRange": [0, 100]}
     consensus = {"method": "standard_deviation", "normalization": "theoretical_range", "factor": 2}
     db.execute("INSERT INTO templates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (tid, EPC_35_TEMPLATE_NAME, 1, "Questionnaire réduit fourni par le pilote (7 domaines x 5 indicateurs).", "active", json.dumps(scale), json.dumps(scoring), json.dumps(consensus), json.dumps(GRADING), json.dumps({"maxPerDomain": 3}), stamp, stamp, owner_user_id, 0, None))
@@ -1093,7 +1107,7 @@ def matrix_xlsx(template):
     if not xlsxwriter: raise RuntimeError("Le générateur XLSX local n'est pas disponible")
     out=BytesIO(); wb=xlsxwriter.Workbook(out, {"in_memory": True}); head=wb.add_format({"bold":True,"bg_color":"#1F4E78","font_color":"#FFFFFF"}); wrap=wb.add_format({"text_wrap":True,"valign":"top"})
     guide=wb.add_worksheet("MODE D’EMPLOI"); guide.set_column(0,0,110); guide.write("A1","Cette matrice permet de préparer un questionnaire avant de l’importer dans l’outil.",head); guide.write_column("A3",["1. Dans la feuille PARAMETRES, remplacez la valeur d’exemple par le vrai nom de votre questionnaire.","2. Complétez la description (facultatif) et les libellés de l’échelle de notation (une seule fois, valables pour tout le questionnaire).","3. Dans la feuille QUESTIONNAIRE, saisissez une ligne par indicateur.","4. Répétez le nom du domaine pour les indicateurs appartenant au même domaine.","5. La numérotation sera générée automatiquement par l’outil.","6. Les lignes d’exemple (matrice PARAMETRES et QUESTIONNAIRE) peuvent être remplacées ou supprimées : elles servent uniquement de modèle, à l’image du questionnaire EPC/SENEVAL."],wrap)
-    default_labels={"5":"Totalement d’accord","4":"D’accord","3":"Neutre","2":"Pas d’accord","1":"Totalement en désaccord"}
+    default_labels=dict(SCALE_LABELS_DEFAULT)
     smin,smax=int(template["scale"]["min"]),int(template["scale"]["max"])
     ps=wb.add_worksheet("PARAMETRES"); ps.write_row(0,0,["Nom du questionnaire (à remplacer par le vôtre)",template["name"]],head); ps.write_row(1,0,["Description",template["description"]],wrap); ps.write_row(3,0,["Note","Libellé (exemple EPC/SENEVAL, à adapter)"],head); labels=template["scale"].get("labels",{}); [ps.write_row(4+(smax-n),0,[n,labels.get(str(n)) or default_labels.get(str(n),'')]) for n in range(smax,smin-1,-1)]; ps.set_column(0,0,38); ps.set_column(1,1,55)
     ws=wb.add_worksheet("QUESTIONNAIRE"); ws.write_row(0,0,["Domaine","Référence","Indicateur qualitatif ou Capacité"],head); ws.freeze_panes(1,0); row=1

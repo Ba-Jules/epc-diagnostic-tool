@@ -20,6 +20,17 @@ class EngineTests(unittest.TestCase):
     def test_epc_seed_has_seven_domains_and_seventy_indicators(self):
         t=self.db.execute('select id from templates where is_canonical=1').fetchone()['id']; payload=app.template_payload(self.db,t)
         self.assertEqual(len(payload['domains']),7); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),70)
+    def test_scale_labels_default_is_the_seneval_v5_wording(self):
+        """Les 5 libellés demandés par le commanditaire sont la source unique utilisée par
+        seed_epc(), ensure_epc_35_template() et la matrice XLSX. Seuls les libellés sont
+        concernés : l'échelle numérique reste 1-5 et le barème GRADING est inchangé."""
+        expected={"1":"Tout à fait en désaccord","2":"Plutôt en désaccord","3":"Moyennement d’accord","4":"Plutôt d’accord","5":"Tout à fait d’accord"}
+        self.assertEqual(app.SCALE_LABELS_DEFAULT,expected)
+        for name in ("EPC / SENEVAL",app.EPC_35_TEMPLATE_NAME):
+            scale=json.loads(self.db.execute("select scale_json from templates where name=? and version=1",(name,)).fetchone()["scale_json"])
+            self.assertEqual(scale["labels"],expected,name); self.assertEqual((scale["min"],scale["max"]),(1,5),name)
+        self.assertEqual(app.GRADING[0],(0,22,5)); self.assertEqual(app.GRADING[-1],(99,100,100))
+
     def test_grade_and_analysis_keep_raw_responses(self):
         t=self.db.execute('select id,version from templates where is_canonical=1').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None))
         domain=self.db.execute('select id from domains where display_order=1').fetchone()['id']; inds=self.db.execute('select id from indicators where domain_id=? order by display_order limit 1',(domain,)).fetchone()['id']
