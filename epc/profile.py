@@ -86,6 +86,9 @@ DEFAULT_PROFILE_SCHEMAS = {
         ],
     },
 }
+# SenEval V5 (7x5, epc/db.py ensure_seneval_v5_template) : meme methode EPC, meme
+# profil participant par defaut.
+DEFAULT_PROFILE_SCHEMAS["epc_seneval_v5"] = DEFAULT_PROFILE_SCHEMAS["epc_seneval"]
 
 
 def ensure_default_profile_schema(db: sqlite3.Connection, owner_user_id: str | None, model_key: str) -> str | None:

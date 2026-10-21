@@ -32,7 +32,7 @@ import urllib.error
 from epc.db import (
     DATABASE, EPC_DOMAINS, GRADING, now, rows, connect, init_db,
     ensure_reference_questionnaire_version, migrate_v2_ownership, seed_epc, template_payload,
-    MODEL_KEY_EPC_SENEVAL, ensure_model_identity,
+    MODEL_KEY_EPC_SENEVAL, ensure_model_identity, ensure_seneval_v5_template,
 )
 from epc.restitution import (
     restitution_manifest, session_restitution_manifest, resolve_model_key,
@@ -58,7 +58,7 @@ from epc.util import slugify
 from epc.campaigns import (
     SESSION_CHILD_TABLES, esc_html, session_label, generate_group_code,
     campaign_deletion_summary, delete_group_cascade, delete_campaign_cascade,
-    campaign_kits_zip, create_campaign, update_campaign, create_group,
+    campaign_kits_zip, create_campaign, update_campaign, create_group, update_group,
     regenerate_group_relay, create_session, update_session,
 )
 from epc.collecte import (
@@ -550,7 +550,9 @@ class Handler(SimpleHTTPRequestHandler):
                 camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()
                 if not camp: return self.json(404, {"error": "Campagne introuvable."})
                 if not (data.get("name") or "").strip(): return self.json(400, {"error": "Le nom du groupe est obligatoire."})
-                return self.json(201, create_group(db, camp, user["id"], data))
+                # Le groupe appartient au proprietaire de la campagne, meme s'il est
+                # cree par un admin : sinon le pilote recevrait un 403 sur son propre groupe.
+                return self.json(201, create_group(db, camp, camp["owner_user_id"], data))
             if path.startswith("/api/campaigns/") and path.endswith("/consolidate"):
                 cid = path.split("/")[3]
                 session_ids = data.get("sessionIds") or []
@@ -798,6 +800,11 @@ class Handler(SimpleHTTPRequestHandler):
         path, data, db = urlparse(self.path).path, self.body(), self.db()
         try:
             user = self.require_auth(path, db)
+            if path.startswith("/api/campaigns/") and "/groups/" in path:
+                parts = path.split("/")
+                if "name" in data and not (data.get("name") or "").strip(): return self.json(400, {"error": "Le nom du groupe est obligatoire."})
+                if not update_group(db, parts[3], parts[5], data): return self.json(404, {"error": "Groupe introuvable."})
+                return self.json(200, {"ok": True})
             if path.startswith("/api/campaigns/") and not path.endswith("/groups"):
                 cid = path.rsplit("/", 1)[1]
                 camp = db.execute("SELECT * FROM campaigns WHERE id=?", (cid,)).fetchone()

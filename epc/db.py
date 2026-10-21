@@ -203,6 +203,52 @@ def init_db(db: sqlite3.Connection) -> None:
     # ownerless-assignable.
     ensure_model_identity(db)
     migrate_v2_ownership(db)
+    ensure_seneval_v5_template(db)
+
+
+# SenEval V5 (7 domaines x 5 indicateurs), mission RFE : contenu repris tel quel de
+# la version V5 deja validee sur :8810 (gabarit "EPC / SENEVAL (7 domaines x 5
+# indicateurs)", 7 introductions courtes par domaine + libelles d'echelle V5),
+# exporte de la base :8810 dans epc/seneval_v5_7x5.json plutot que retape.
+# model_key distinct de MODEL_KEY_EPC_SENEVAL : ensure_model_identity() /
+# ensure_reference_questionnaire_version() ne doivent jamais le prendre pour le
+# referentiel 7x70 (sinon il deviendrait canonique ou declencherait une nouvelle
+# version 7x70), mais il herite du profil participant et du manifeste de
+# restitution EPC (epc/profile.py, epc/restitution.py).
+MODEL_KEY_SENEVAL_V5 = "epc_seneval_v5"
+SENEVAL_V5_FILE = Path(__file__).with_name("seneval_v5_7x5.json")
+SENEVAL_V5_MARK = "seneval_v5_7x5"
+SENEVAL_V5_OWNER_EMAIL = "mouhba@local"
+
+
+def ensure_seneval_v5_template(db: sqlite3.Connection) -> str | None:
+    """Cree une fois, et une seule, le gabarit SenEval V5. Strictement additif : un
+    INSERT sur des lignes neuves, jamais un UPDATE/DELETE sur un gabarit, une
+    session ou une reponse existants.
+
+    L'idempotence repose sur la table additive provisioning_marks (meme mecanisme
+    que :8810), pas sur le nom/la version : un gabarit supprime volontairement par
+    le pilote n'est donc pas recree au redemarrage suivant. Rattache au compte
+    pilote (recherche par email) pour qu'il apparaisse dans ses questionnaires et
+    ne soit pas reattribue par migrate_v2_ownership() ; sans ce compte (base neuve
+    ou de test), owner NULL, comme un modele commun."""
+    db.execute("CREATE TABLE IF NOT EXISTS provisioning_marks (key TEXT PRIMARY KEY, template_id TEXT, created_at TEXT NOT NULL)")
+    if db.execute("SELECT 1 FROM provisioning_marks WHERE key=?", (SENEVAL_V5_MARK,)).fetchone():
+        return None
+    spec = json.loads(SENEVAL_V5_FILE.read_text(encoding="utf-8"))
+    owner = db.execute("SELECT id FROM users WHERE email=?", (SENEVAL_V5_OWNER_EMAIL,)).fetchone()
+    tid, stamp = str(uuid.uuid4()), now()
+    version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM templates WHERE name=?", (spec["name"],)).fetchone()[0]
+    db.execute("INSERT INTO templates (id,name,version,description,status,scale_json,scoring_json,consensus_json,grading_json,priority_json,created_at,updated_at,owner_user_id,model_key,is_canonical) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, spec["name"], version, spec["description"], "active", json.dumps(spec["scale"]), json.dumps(spec["scoring"]), json.dumps(spec["consensus"]), json.dumps(spec["grading"]), json.dumps(spec["priority"]), stamp, stamp, owner["id"] if owner else None, MODEL_KEY_SENEVAL_V5, 0))
+    for d_order, domain in enumerate(spec["domains"], 1):
+        did = str(uuid.uuid4())
+        db.execute("INSERT INTO domains VALUES (?,?,?,?,?,?,?)", (did, tid, domain["code"], domain["label"], domain["description"], d_order, 1))
+        for i_order, ind in enumerate(domain["indicators"], 1):
+            db.execute("INSERT INTO indicators VALUES (?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), did, ind["code"], ind["label"], ind["description"], "numeric", 1, i_order, 1, "{}"))
+    db.execute("INSERT INTO provisioning_marks VALUES (?,?,?)", (SENEVAL_V5_MARK, tid, stamp))
+    db.commit()
+    return tid
 
 
 def ensure_reference_questionnaire_version(db: sqlite3.Connection) -> None:

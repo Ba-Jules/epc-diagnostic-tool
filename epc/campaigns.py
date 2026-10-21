@@ -197,6 +197,26 @@ def create_group(db: sqlite3.Connection, campaign, owner_user_id: str, data: dic
     return {"id": sid, "groupCode": group_code, "groupColor": group_color, "relayToken": raw_token}
 
 
+def update_group(db: sqlite3.Connection, campaign_id: str, session_id: str, data: dict) -> bool:
+    """Renomme un groupe / change son relais ou son objectif. Ne touche ni au
+    questionnaire, ni au code/couleur, ni au lien participant (session_id
+    inchange) ni au lien relais : un groupe deja en collecte peut donc etre
+    renomme sans rien casser. Un champ absent de `data` est conserve. Returns
+    False si le groupe n'appartient pas a cette campagne."""
+    g = db.execute("SELECT * FROM sessions WHERE id=? AND campaign_id=?", (session_id, campaign_id)).fetchone()
+    if not g:
+        return False
+    name = (data["name"].strip() if "name" in data else g["name"]) or g["name"]
+    relay = data["relayName"].strip() if "relayName" in data else g["relay_name"]
+    if "expectedParticipants" in data:
+        expected = int(data["expectedParticipants"]) if data["expectedParticipants"] not in (None, "") else None
+    else:
+        expected = g["expected_participants"]
+    db.execute("UPDATE sessions SET name=?,relay_name=?,expected_participants=? WHERE id=?", (name, relay, expected, session_id))
+    db.commit()
+    return True
+
+
 def regenerate_group_relay(db: sqlite3.Connection, session_id: str) -> str:
     raw_token = secrets.token_urlsafe(24)
     db.execute("UPDATE sessions SET relay_token_hash=? WHERE id=?", (relay_token_hash(raw_token), session_id))

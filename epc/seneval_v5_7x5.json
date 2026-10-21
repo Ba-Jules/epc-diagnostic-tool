@@ -1,0 +1,359 @@
+{
+ "name": "EPC / SENEVAL (7 domaines x 5 indicateurs)",
+ "description": "Version SenEval V5 : introduction courte par domaine et libelles d'echelle V5. Memes 7 domaines et memes 35 indicateurs que la version precedente.",
+ "scale": {
+  "type": "numeric",
+  "min": 1,
+  "max": 5,
+  "labels": {
+   "1": "Tout à fait en désaccord",
+   "2": "Plutôt en désaccord",
+   "3": "Moyennement d’accord",
+   "4": "Plutôt d’accord",
+   "5": "Tout à fait d’accord"
+  }
+ },
+ "scoring": {
+  "capacity": "mean_divided_by_scale_max",
+  "outputRange": [
+   0,
+   100
+  ]
+ },
+ "consensus": {
+  "method": "standard_deviation",
+  "normalization": "theoretical_range",
+  "factor": 2
+ },
+ "grading": [
+  [
+   0,
+   22,
+   5
+  ],
+  [
+   23,
+   32,
+   10
+  ],
+  [
+   33,
+   39,
+   15
+  ],
+  [
+   40,
+   45,
+   20
+  ],
+  [
+   46,
+   50,
+   25
+  ],
+  [
+   51,
+   55,
+   30
+  ],
+  [
+   56,
+   59,
+   35
+  ],
+  [
+   60,
+   63,
+   40
+  ],
+  [
+   64,
+   67,
+   45
+  ],
+  [
+   68,
+   71,
+   50
+  ],
+  [
+   72,
+   74,
+   55
+  ],
+  [
+   75,
+   78,
+   60
+  ],
+  [
+   79,
+   81,
+   65
+  ],
+  [
+   82,
+   84,
+   70
+  ],
+  [
+   85,
+   87,
+   75
+  ],
+  [
+   88,
+   89,
+   80
+  ],
+  [
+   90,
+   92,
+   85
+  ],
+  [
+   93,
+   95,
+   90
+  ],
+  [
+   96,
+   98,
+   95
+  ],
+  [
+   99,
+   100,
+   100
+  ]
+ ],
+ "priority": {
+  "maxPerDomain": 3
+ },
+ "domains": [
+  {
+   "code": "grh",
+   "label": "1 Gestion des ressources humaines",
+   "description": "Les échanges ont fait ressortir les efforts de formation de SenEval, mais aussi des difficultés liées à la participation, à la circulation de l’information et au suivi des membres.",
+   "indicators": [
+    {
+     "code": "Compétences appropriées",
+     "label": "Le membre de l’association possède les compétences appropriées pour accomplir la mission",
+     "description": ""
+    },
+    {
+     "code": "Pratiques supervision",
+     "label": "Les pratiques de supervision renforcent les capacités du membre à atteindre les objectifs",
+     "description": ""
+    },
+    {
+     "code": "Formation aux priorités ",
+     "label": "La formation offerte est directement liée aux priorités de l'organisation",
+     "description": ""
+    },
+    {
+     "code": "Évaluation pour motivation",
+     "label": "L'évaluation du membre favorise sa motivation et sa fidélisation",
+     "description": ""
+    },
+    {
+     "code": "Allocation tâches",
+     "label": "L'allocation des tâches et des responsabilités favorise la fidélisation du membre",
+     "description": ""
+    }
+   ]
+  },
+  {
+   "code": "grf",
+   "label": "2 Gestion des ressources financières",
+   "description": "Les discussions ont fait ressortir des difficultés liées au recouvrement des cotisations, à la mobilisation des financements et à la faiblesse des appuis des partenaires.",
+   "indicators": [
+    {
+     "code": "Stratégie cotisations",
+     "label": "La stratégie de mobilisation des cotisations est efficace",
+     "description": ""
+    },
+    {
+     "code": "Sources diversifiées",
+     "label": "Les sources de financement de l’association sont diversifiées",
+     "description": ""
+    },
+    {
+     "code": "Niveau d'appui stable",
+     "label": "Le niveau d'appui des partenaires au développement est stable ou croissant",
+     "description": ""
+    },
+    {
+     "code": "Ressources et activités",
+     "label": "Les ressources disponibles permettent de réaliser correctement les activités",
+     "description": ""
+    },
+    {
+     "code": "Fonds alloués",
+     "label": "Les fonds mobilisés sont adéquatement alloués aux activités",
+     "description": ""
+    }
+   ]
+  },
+  {
+   "code": "parteq",
+   "label": "3 Gestion de la participation équitable",
+   "description": "Les échanges ont fait ressortir l’existence de six groupes thématiques, mais aussi des difficultés de motivation et de participation effective des membres.",
+   "indicators": [
+    {
+     "code": "Parties prenantes",
+     "label": "Les parties prenantes participent à la conception des projets",
+     "description": ""
+    },
+    {
+     "code": "Participation des parties prenantes ",
+     "label": "Les parties prenantes participent à la mise en œuvre des projets",
+     "description": ""
+    },
+    {
+     "code": "Parties prenantes Groupes",
+     "label": "Les parties prenantes participent aux Groupes techniques de travail",
+     "description": ""
+    },
+    {
+     "code": "Projets suivis",
+     "label": "Les projets et activités sont suivis et évalués",
+     "description": ""
+    },
+    {
+     "code": "Dialogue avec décideurs",
+     "label": "L'organisation entretient un dialogue régulier avec les décideurs et les institutions concernés",
+     "description": ""
+    }
+   ]
+  },
+  {
+   "code": "dur",
+   "label": "4 Gestion de la durabilité des acquis",
+   "description": "Les discussions ont fait ressortir des acquis institutionnels importants, mais aussi des préoccupations concernant la fidélisation des membres et leur implication dans les projets.",
+   "indicators": [
+    {
+     "code": "Durabilité institutionnelle",
+     "label": "La durabilité institutionnelle est intégrée dès la conception des projets",
+     "description": ""
+    },
+    {
+     "code": "17",
+     "label": "La durabilité institutionnelle est prise en compte pendant la mise en œuvre",
+     "description": ""
+    },
+    {
+     "code": "18",
+     "label": "La durabilité institutionnelle est évaluée lors du suivi et de l'évaluation",
+     "description": ""
+    },
+    {
+     "code": "Appui technique",
+     "label": "L'appui technique contribue effectivement à la durabilité des résultats",
+     "description": ""
+    },
+    {
+     "code": "Durabilité économique",
+     "label": "La durabilité économique est intégrée dès la conception des projets",
+     "description": ""
+    }
+   ]
+  },
+  {
+   "code": "partn",
+   "label": "5 Gestion du partenariat",
+   "description": "Les échanges ont fait ressortir un réseau diversifié de partenaires institutionnels et professionnels, ainsi que le développement de relations avec plusieurs institutions publiques.",
+   "indicators": [
+    {
+     "code": "Partenariats productifs",
+     "label": "L'organisation développe des partenariats productifs avec d'autres organisations",
+     "description": ""
+    },
+    {
+     "code": "22",
+     "label": "Les partenariats font l'objet d'un suivi régulier",
+     "description": ""
+    },
+    {
+     "code": "23",
+     "label": "Les partenariats reposent sur des mécanismes favorisant la confiance et la coopération",
+     "description": ""
+    },
+    {
+     "code": "Contribution aux objectifs ",
+     "label": "Chaque partenaire contribue effectivement aux objectifs communs",
+     "description": ""
+    },
+    {
+     "code": "Nouveaux réseaux ",
+     "label": "Les partenariats permettent de développer de nouveaux réseaux et relations stratégiques",
+     "description": ""
+    }
+   ]
+  },
+  {
+   "code": "apporg",
+   "label": "6 Gestion de l'apprentissage organisationnel",
+   "description": "Les discussions ont fait ressortir plusieurs initiatives de formation, de coaching, de mentorat et de partage de connaissances, notamment au bénéfice des évaluateurs émergents.",
+   "indicators": [
+    {
+     "code": "Suivi-évaluation ",
+     "label": "Les projets font régulièrement l'objet d'un suivi et évaluation",
+     "description": ""
+    },
+    {
+     "code": "Bonnes pratiques",
+     "label": "Les bonnes pratiques et leçons apprises sont partagées avec les membres et les partenaires ",
+     "description": ""
+    },
+    {
+     "code": "Réunions apprentissage",
+     "label": "Les réunions favorisent l'apprentissage organisationnel ",
+     "description": ""
+    },
+    {
+     "code": "Interdépendance des tructures",
+     "label": "Les structures reconnaissent leur interdépendance dans la résolution des problèmes",
+     "description": ""
+    },
+    {
+     "code": "Innovation encouragée",
+     "label": "L'organisation encourage l'innovation et une prise de risque maîtrisée",
+     "description": ""
+    }
+   ]
+  },
+  {
+   "code": "gouv",
+   "label": "7 Gestion stratégique et gouvernance",
+   "description": "Les échanges ont fait ressortir des difficultés de communication entre le Comité de coordination et les Groupes thématiques, ainsi que des préoccupations concernant la supervision des activités.",
+   "indicators": [
+    {
+     "code": "Initiatives alignées",
+     "label": "Les initiatives sont alignées sur les plans stratégiques et opérationnels",
+     "description": ""
+    },
+    {
+     "code": "Progrès suivis ",
+     "label": "Les progrès vers les objectifs stratégiques sont suivis régulièrement",
+     "description": ""
+    },
+    {
+     "code": "33",
+     "label": "Les organes fonctionnent régulièrement en respectant  les objectifs de l'organisation",
+     "description": ""
+    },
+    {
+     "code": "Planification stratégique en PAO",
+     "label": "La planification stratégique  est déclinée en plans d’action opérationnels",
+     "description": ""
+    },
+    {
+     "code": "Mobilisation des ressources ",
+     "label": "Le Comité de coordination contribue efficacement à la mobilisation des ressources",
+     "description": ""
+    }
+   ]
+  }
+ ]
+}

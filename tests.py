@@ -32,7 +32,7 @@ class EngineTests(unittest.TestCase):
             for iid in inds:
                 self.db.execute('insert into responses values(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),sid,pid,iid,str(value),'numeric',app.now(),app.now()))
     def test_epc_seed_has_seven_domains_and_seventy_indicators(self):
-        t=self.db.execute('select id from templates').fetchone()['id']; payload=app.template_payload(self.db,t)
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']; payload=app.template_payload(self.db,t)
         self.assertEqual(len(payload['domains']),7); self.assertEqual(sum(len(d['indicators']) for d in payload['domains']),70)
     def test_grade_and_analysis_keep_raw_responses(self):
         t=self.db.execute('select id,version from templates').fetchone(); sid='session'; self.db.execute("insert into sessions values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,t['id'],t['version'],'test','','','', 'open',app.now(),None,'',None,None,None,None,None,None,None,None,None))
@@ -409,7 +409,7 @@ class EngineTests(unittest.TestCase):
     # --- Lot 1c (modularisation) : clonage/creation/import de questionnaires extraits vers epc/templates.py ---
 
     def test_clone_template_creates_new_version_with_same_content(self):
-        t=self.db.execute('select id from templates').fetchone()['id']
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']
         new_id=app.clone_template(self.db,t,name='EPC / SENEVAL')
         self.assertNotEqual(new_id,t)
         old=app.template_payload(self.db,t); new=app.template_payload(self.db,new_id)
@@ -427,7 +427,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(app.next_order(self.db,'domains','template_id',tid),2)
 
     def test_matrix_xlsx_produces_a_sizeable_workbook(self):
-        t=self.db.execute('select id from templates').fetchone()['id']
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']
         xlsx_bytes=app.matrix_xlsx(app.template_payload(self.db,t))
         self.assertGreater(len(xlsx_bytes),1000)
 
@@ -436,7 +436,7 @@ class EngineTests(unittest.TestCase):
         # questionnaire (whose indicators have a non-empty code/label and an always-
         # empty description, see seed_epc) and re-importing it unedited must now work
         # with zero errors and all 70 indicators recovered.
-        t=self.db.execute('select id from templates').fetchone()['id']
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']
         template=app.template_payload(self.db,t)
         preview=app.import_preview(app.matrix_xlsx(template))
         self.assertEqual(preview['errors'],[])
@@ -650,7 +650,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(app.template_payload(self.db,tid)['domains'],[])
 
     def test_delete_domain_blocked_by_responses(self):
-        t=self.db.execute('select id from templates').fetchone()['id']
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']
         sid=self._mk_session('sess-dom-block')
         inds=self._indicator_ids(t)
         domain=self.db.execute('select domain_id from indicators where id=?',(inds[0],)).fetchone()['domain_id']
@@ -670,7 +670,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(deleted); self.assertEqual(used,0)
 
     def test_delete_indicator_blocked_by_responses(self):
-        t=self.db.execute('select id from templates').fetchone()['id']
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']
         self._mk_session('sess-ind-block')
         self._add_participant('sess-ind-block','p0',t,value=4,n=1)
         indicator=self._indicator_ids(t)[0]
@@ -678,7 +678,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(deleted); self.assertEqual(used,1)
 
     def test_update_template_forks_when_used_by_a_session(self):
-        t=self.db.execute('select id from templates').fetchone()['id']
+        t=self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id']
         self._mk_session('sess-tpl-fork')
         new_id,version_created=app.update_template(self.db,t,{'name':'EPC / SENEVAL modifie'})
         self.assertTrue(version_created); self.assertNotEqual(new_id,t)
@@ -1901,7 +1901,7 @@ class EngineTests(unittest.TestCase):
 
     def test_report_data_includes_the_session_restitution_manifest(self):
         sid='sess-restitution-manifest'; self._mk_session(sid)
-        pid='p'; self._add_participant(sid,pid,self.db.execute('select id from templates').fetchone()['id'],value=4,n=1)
+        pid='p'; self._add_participant(sid,pid,self.db.execute('select id from templates where model_key=?',('epc_seneval',)).fetchone()['id'],value=4,n=1)
         self.db.commit()
         data=app.report_data(self.db,sid)
         self.assertEqual(data['manifest']['modelKey'],'epc_seneval')
@@ -1999,5 +1999,57 @@ class EngineTests(unittest.TestCase):
     def test_session_restitution_manifest_matches_restitution_manifest_for_the_sessions_template(self):
         sid='sess-restitution-manifest-2'; self._mk_session(sid)
         self.assertEqual(app.session_restitution_manifest(self.db,sid),app.restitution_manifest({'model_key':'epc_seneval'}))
+
+    # ---- Mission RFE : SenEval V5 (7x5) + campagne multi-groupes ----
+    def _v5(self):
+        return self.db.execute("select * from templates where model_key='epc_seneval_v5'").fetchall()
+    def test_seneval_v5_provisioned_once_with_intros_and_v5_scale(self):
+        v5=self._v5(); self.assertEqual(len(v5),1); t=app.template_payload(self.db,v5[0]['id'])
+        self.assertEqual(len(t['domains']),7); self.assertEqual([len(d['indicators']) for d in t['domains']],[5]*7)
+        self.assertTrue(all(d['description'].strip() for d in t['domains']))
+        self.assertEqual(t['scale']['labels']['5'],'Tout à fait d’accord'); self.assertEqual(t['scale']['labels']['1'],'Tout à fait en désaccord')
+        self.assertEqual(t['is_canonical'],0)
+        canon=self.db.execute("select * from templates where is_canonical=1").fetchall()
+        self.assertEqual(len(canon),1); self.assertEqual(canon[0]['model_key'],'epc_seneval')
+        self.assertEqual(sum(len(d['indicators']) for d in app.template_payload(self.db,canon[0]['id'])['domains']),70)
+    def test_seneval_v5_idempotent_and_not_recreated_after_deletion(self):
+        app.init_db(self.db); self.assertEqual(len(self._v5()),1)
+        tid=self._v5()[0]['id']; self.assertEqual(app.delete_template(self.db,tid),'deleted')
+        app.init_db(self.db); self.assertEqual(len(self._v5()),0)
+        self.assertEqual(self.db.execute("select count(*) from templates where model_key='epc_seneval'").fetchone()[0],1)
+    def test_seneval_v5_never_touches_existing_templates_or_sessions(self):
+        self.db.execute("delete from provisioning_marks"); tid=self._v5()[0]['id']; app.delete_template(self.db,tid)
+        sid='sess-before-v5'; t70=self._mk_session(sid); self._add_participant(sid,'p-before',t70,value=4); self.db.commit()
+        snap=lambda:(self.db.execute("select group_concat(id||name||version||scale_json,'|') from templates").fetchone()[0],self.db.execute("select group_concat(id||label||coalesce(description,''),'|') from domains").fetchone()[0],self.db.execute("select count(*),sum(value_json) from responses").fetchone()[:],self.db.execute("select template_id,template_version from sessions where id=?",(sid,)).fetchone()[:])
+        before=snap(); app.ensure_seneval_v5_template(self.db)
+        self.assertEqual(len(self._v5()),1)
+        after=snap(); self.assertTrue(after[0].startswith(before[0])); self.assertTrue(after[1].startswith(before[1])); self.assertEqual(after[2:],before[2:])
+    def test_seneval_v5_attached_to_pilot_account_when_present(self):
+        self.db.execute("delete from provisioning_marks"); app.delete_template(self.db,self._v5()[0]['id'])
+        uid=self._mk_user('u-pere',email='mouhba@local'); self.db.commit(); app.ensure_seneval_v5_template(self.db)
+        self.assertEqual(self._v5()[0]['owner_user_id'],uid)
+        app.migrate_v2_ownership(self.db); self.assertEqual(self._v5()[0]['owner_user_id'],uid)
+    def test_rfe_campaign_four_groups_on_v5_consolidate_and_rename(self):
+        pilote=self._mk_user('u-pilote'); admin=self._mk_user('u-admin',role='admin'); v5=self._v5()[0]
+        cid=app.create_campaign(self.db,pilote,v5['id'],v5['version'],{'name':'RFE / Enquetes'}); camp=self.db.execute('select * from campaigns where id=?',(cid,)).fetchone()
+        self.assertIsNotNone(camp['profile_schema_id'])
+        groups=[app.create_group(self.db,camp,camp['owner_user_id'],{'name':f'Groupe {k}','relayName':r,'expectedParticipants':20}) for k,r in enumerate(['A','B','C','D'],1)]
+        rows=self.db.execute('select * from sessions where campaign_id=?',(cid,)).fetchall()
+        self.assertEqual(len(rows),4); self.assertEqual({r['template_id'] for r in rows},{v5['id']}); self.assertEqual({r['owner_user_id'] for r in rows},{pilote})
+        for k,g in enumerate(groups): self._add_participant(g['id'],f'p{k}',v5['id'],value=k+2)
+        self.db.commit()
+        out=app.analysis_for(self.db,[g['id'] for g in groups])
+        self.assertEqual(out['completedCount'],4); self.assertEqual(out['global']['responses'],140)
+        # (2+3+4+5)/4=3.5 -> 70 %
+        self.assertEqual(out['global']['capacity'],70)
+        self.assertEqual(len(out['domains']),7)
+        g0=self.db.execute('select * from sessions where id=?',(groups[0]['id'],)).fetchone()
+        self.assertTrue(app.update_group(self.db,cid,g0['id'],{'name':'Groupe 1 — Dakar','relayName':'Nouveau relais'}))
+        g1=self.db.execute('select * from sessions where id=?',(g0['id'],)).fetchone()
+        self.assertEqual((g1['name'],g1['relay_name'],g1['expected_participants']),('Groupe 1 — Dakar','Nouveau relais',20))
+        self.assertEqual((g1['template_id'],g1['relay_token_hash'],g1['group_code']),(g0['template_id'],g0['relay_token_hash'],g0['group_code']))
+        self.assertEqual(self.db.execute('select count(*) from responses where session_id=?',(g0['id'],)).fetchone()[0],35)
+        self.assertFalse(app.update_group(self.db,'autre-campagne',g0['id'],{'name':'x'}))
+        g5=app.create_group(self.db,camp,camp['owner_user_id'],{'name':'Groupe 5'}); self.assertTrue(g5['relayToken'])
 
 if __name__=='__main__': unittest.main()
