@@ -50,7 +50,7 @@ Un assistant IA facultatif peut être activé depuis Configuration (« 5 · Assi
 - `app.py` : serveur local, base SQLite, API et calculs.
 - `static/` : interface web, graphiques et styles d’impression.
 - `tests.py` : tests automatisés du moteur.
-- `archive/` et les classeurs/documents à la racine : références méthodologiques et historiques EPC/SENEVAL.
+- Les classeurs à la racine : références méthodologiques EPC/SENEVAL. Les fichiers de mission ne sont pas publiés.
 - `data/` : données locales d’exécution, non versionnées.
 
 La recette terrain avec les utilisateurs et ateliers réels reste à effectuer.
