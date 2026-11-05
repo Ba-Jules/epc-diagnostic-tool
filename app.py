@@ -99,7 +99,7 @@ def export_filename(*parts, ext: str) -> str:
 
 AI_PROVIDERS = {
     "gemini": {"label": "Google Gemini", "pricing": "GRATUIT", "family": "gemini",
-        "models": [("gemini-2.0-flash", "Recommandé"), ("gemini-1.5-flash", "Alternatif")],
+        "models": [("gemini-flash-latest", "Recommandé"), ("gemini-flash-lite-latest", "Rapide, quota plus large")],
         "key_url": "https://aistudio.google.com/apikey"},
     "groq": {"label": "Groq", "pricing": "GRATUIT", "family": "openai", "base_url": "https://api.groq.com/openai/v1",
         "models": [("llama-3.3-70b-versatile", "Recommandé"), ("llama-3.1-8b-instant", "Rapide")],
@@ -159,6 +159,20 @@ def _call_openai_compatible(base_url, api_key, model, system_prompt, user_prompt
 
 
 def _call_gemini(api_key, model, system_prompt, user_prompt):
+    """Modèles 1.x et 2.0 retirés par Google : modèle actif par défaut, puis secours si retiré ou saturé."""
+    wanted = model if model and not re.match(r"gemini-(1\.|2\.0)", model) else "gemini-flash-latest"
+    last = None
+    for m in dict.fromkeys([wanted, "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]):
+        try:
+            return _call_gemini_once(api_key, m, system_prompt, user_prompt)
+        except AIError as e:
+            last = e
+            if not re.search(r"Modèle indisponible|Quota atteint|code 5\d\d", str(e)):
+                raise
+    raise last
+
+
+def _call_gemini_once(api_key, model, system_prompt, user_prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     data = _http_json(url, {"Content-Type": "application/json"},
         {"systemInstruction": {"parts": [{"text": system_prompt}]}, "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
