@@ -45,6 +45,9 @@ const SIDEBAR_ITEMS=[
   {key:'recommandations',label:'Recommandations',ic:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0-3.5 10.9c.5.4.8 1 .8 1.6v.5h5.4v-.5c0-.6.3-1.2.8-1.6A6 6 0 0 0 12 3z"/><path d="M9.5 19h5M10.5 21.5h3"/></svg>',need:true,go:()=>recommendationsView(window.currentSessionId)},
   {key:'rapport',label:'Rapport',ic:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h8l4 4V20a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z"/><path d="M8.5 11h7M8.5 14h7M8.5 17h4"/></svg>',need:true,go:()=>finalReport(window.currentSessionId)},
 ];
+// Petit ecran (< 960 px) : le menu lateral est masque ; le bouton "Menu" du bandeau
+// l'ouvre, un clic en dehors le referme (sinon "Campagnes" est inaccessible).
+document.addEventListener('click',e=>{let s=document.querySelector('#sidebar');if(s&&s.classList.contains('open')&&!s.contains(e.target))s.classList.remove('open')});
 function renderSidebar(active){
   let cur=window.currentSessionSummary;
   return `<div class="sidebar-brand"><div class="logo"></div><div><b>EPC / SENEVAL</b><span>Diagnostic</span></div></div>
@@ -54,7 +57,7 @@ function renderSidebar(active){
 }
 function renderTopbar(title,subtitle,cycleStage){
   let stages=[['config','CONFIGURER'],['collecte','COLLECTER'],['traiter','TRAITER'],['analyse','ANALYSER'],['restitution','RESTITUER']];
-  return `<div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-help" title="Aide" onclick="helpPanel()">?</button>`;
+  return `<button class="topbar-menu" aria-label="Ouvrir le menu" onclick="event.stopPropagation();document.querySelector('#sidebar').classList.toggle('open')">☰ Menu</button><div><h1>${esc(title||'')}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div><div class="cycle-nav">${stages.map(([k,l])=>`<div class="cycle-step ${k===cycleStage?'active':''}"><span class="cycle-ic">${k===cycleStage?'●':'○'}</span>${l}</div>`).join('')}</div><button class="topbar-help" title="Aide" onclick="helpPanel()">?</button>`;
 }
 const HELP_SCREENS={
   home:{title:'Accueil',body:`
@@ -190,6 +193,7 @@ function helpPanel(){
 }
 function shell(active,cycleStage,title,subtitle,sessionSummary){
   document.querySelector('.app-shell')?.classList.remove('participant-mode');
+  document.querySelector('#sidebar')?.classList.remove('open');
   window.currentHelpKey=active;
   if(sessionSummary!==undefined)window.currentSessionSummary=sessionSummary;
   document.querySelector('#sidebar').innerHTML=renderSidebar(active);
